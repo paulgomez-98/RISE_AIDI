@@ -2,9 +2,9 @@ streamlit
 pandas
 numpy
 openpyxl
-# for SBERT scoring
-sentence-transformers
-torch
-spacy
-# preload spaCy model (optional but speeds first run):
+scikit-learn==1.5.2
+sentence-transformers==2.7.0
+torch==2.4.1
+spacy==3.7.4
+# speeds up spaCy load on Cloud:
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
