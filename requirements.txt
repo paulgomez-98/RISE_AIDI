@@ -2,9 +2,3 @@ streamlit
 pandas
 numpy
 openpyxl
-
-scikit-learn==1.4.2
-sentence-transformers==2.7.0
-spacy==3.7.4
-# preload small English model (faster cold starts)
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
