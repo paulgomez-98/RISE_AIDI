@@ -1,5 +1,3 @@
-# app.py — RISE Smart Scoring (matches your notebook outputs)
-
 import io, re, textwrap, warnings
 warnings.filterwarnings("ignore")
 
@@ -7,58 +5,47 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ML / NLP
-from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVR
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, r2_score
+st.set_page_config(page_title="RISE Scoring & Feedback", page_icon="🎯", layout="wide")
+st.title("RISE Scoring & Feedback")
 
-# Optional visual quick checks
-import altair as alt
+st.write("Upload CSV or Excel (.xlsx). We’ll auto-detect Title/Abstract, remove duplicates, score, "
+         "show **Top-10**, and generate **feedback for ALL applicants** as a CSV.")
 
-# ===== Streamlit page =====
-st.set_page_config(page_title="RISE Smart Scoring", page_icon="🎯", layout="wide")
-st.title("RISE — Smart Scoring & Feedback")
+uploaded = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
-st.caption(
-    "Upload CSV or Excel (.xlsx) → clean duplicates → SBERT rubric scoring (1–5) → "
-    "train explainable TF-IDF + LinearSVR baseline → per-row feedback → Top-10 + CSV exports."
-)
-
-uploaded = st.file_uploader("Upload dataset (CSV or XLSX)", type=["csv", "xlsx"])
 sheet_name = None
 if uploaded and uploaded.name.lower().endswith(".xlsx"):
     try:
         xls = pd.ExcelFile(uploaded, engine="openpyxl")
         sheet_name = st.selectbox("Choose Excel sheet", xls.sheet_names, index=0)
     except Exception as e:
-        st.error(f"Could not open Excel: {e}")
+        st.error(f"Could not read Excel: {e}")
         st.stop()
 
-# -------- Helpers --------
+# ---------- helpers ----------
 @st.cache_data(show_spinner=False)
-def load_df(_uploaded, _sheet):
-    name = _uploaded.name.lower()
-    if name.endswith(".csv"):
-        # be lenient about encodings
+def load_df(file, sheet):
+    if file.name.lower().endswith(".csv"):
         try:
-            return pd.read_csv(_uploaded, engine="python", sep=None, encoding="latin1", on_bad_lines="skip")
+            return pd.read_csv(file, engine="python", sep=None, encoding="latin1", on_bad_lines="skip")
         except Exception:
-            _uploaded.seek(0)
-            return pd.read_csv(_uploaded)
-    # Excel
-    xls = pd.ExcelFile(_uploaded, engine="openpyxl")
-    return pd.read_excel(xls, sheet_name=_sheet or xls.sheet_names[0], engine="openpyxl")
+            file.seek(0)
+            return pd.read_csv(file)
+    xls = pd.ExcelFile(file, engine="openpyxl")
+    return pd.read_excel(xls, sheet_name=sheet or xls.sheet_names[0], engine="openpyxl")
 
-def normalize_for_compare(s: pd.Series) -> pd.Series:
-    return (
-        s.fillna("").astype(str)
-         .str.strip().str.lower()
-         .str.replace(r"\s+", " ", regex=True)
-    )
+def normalize_series(s: pd.Series) -> pd.Series:
+    return (s.fillna("").astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True))
 
-# Your rubric & anchors (from screenshots)
+def guess_col(df: pd.DataFrame, needles):
+    needles = [n.lower() for n in needles]
+    for c in df.columns:
+        lc = str(c).lower()
+        if any(n in lc for n in needles):
+            return c
+    return df.columns[0]
+
+# rubric & anchors (your text)
 RUBRIC = {
     "originality":      "Does the project introduce unique ideas, creative approaches, or innovative concepts? Is the project fresh and distinct from common solutions?",
     "clarity":          "Is the abstract well-organized and easy to follow? Are objectives, methods, and rationale clearly explained? Does the writing flow logically?",
@@ -67,62 +54,15 @@ RUBRIC = {
     "entrepreneurship": "Does the project demonstrate creative approaches to addressing challenges? Are critical thinking and entrepreneurial skills applied effectively?",
 }
 
-ANCHORS = {
-    "originality":      "highly original, inventive, novel concept, new methods, breakthrough innovation",
-    "clarity":          "exceptionally clear, concise, well structured, organized, easy to follow",
-    "rigor":            "robust methodology, detailed methods, rigorous, feasible, strong alignment to project objectives",
-    "impact":           "significant real-world outcomes, high value, societal benefit, measurable industry impact",
-    "entrepreneurship": "highly innovative and entrepreneurial approach; outstanding application of creative solutions",
-}
+# try to import heavy libs; fall back if not available
+def try_get_models():
+    try:
+        from sentence_transformers import SentenceTransformer, util as sbert_util
+        return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device="cpu"), sbert_util
+    except Exception:
+        return None, None
 
-# Load + column mapping
-if not uploaded:
-    st.info("Upload your dataset to begin.")
-    st.stop()
-
-df = load_df(uploaded, sheet_name)
-st.subheader("1) Original Data")
-st.write(f"**{df.shape[0]} rows × {df.shape[1]} cols**")
-st.dataframe(df.head(20), use_container_width=True)
-
-# Column mapper (your exact long headers)
-all_cols = list(df.columns)
-def _guess(col_substring):
-    for c in all_cols:
-        if col_substring in c.lower():
-            return c
-    return None
-
-default_title = _guess("title of your research") or _guess("title")
-default_abs   = _guess("description") or _guess("abstract")
-
-c1, c2 = st.columns(2)
-with c1:
-    TITLE_COL = st.selectbox("Project Title column", options=all_cols,
-                             index=all_cols.index(default_title) if default_title in all_cols else 0)
-with c2:
-    ABSTRACT_COL = st.selectbox("Abstract / Description column", options=all_cols,
-                                index=all_cols.index(default_abs) if default_abs in all_cols else 0)
-
-# --- Dedupe: keep one unique project by normalized title+abstract (matches your cell) ---
-st.subheader("2) Clean duplicates (keep one per unique project)")
-work = df.copy()
-work["_t_norm"] = normalize_for_compare(work[TITLE_COL])
-work["_a_norm"] = normalize_for_compare(work[ABSTRACT_COL])
-
-before = len(work)
-work = work.drop_duplicates(subset=["_t_norm", "_a_norm"], keep="first").reset_index(drop=True)
-after = len(work)
-removed = before - after
-
-work = work.drop(columns=["_t_norm", "_a_norm"])
-st.success(f"Unique project count: **{after}**  (removed **{removed}** duplicate copies)")
-st.dataframe(work[[TITLE_COL, ABSTRACT_COL]].head(10), use_container_width=True)
-
-# ---- spaCy preprocessing (tokenize + lemmatize) ----
-@st.cache_resource(show_spinner=True)
-def get_spacy():
-    # try to load; if not available, fallback to a tiny regex tokenizer
+def spacy_cleaner():
     try:
         import spacy
         try:
@@ -131,160 +71,166 @@ def get_spacy():
             from spacy.cli import download
             download("en_core_web_sm")
             nlp = spacy.load("en_core_web_sm")
-        return nlp
+        def _clean(text: str) -> str:
+            doc = nlp(str(text).lower())
+            kept = []
+            for t in doc:
+                if t.is_stop or t.is_punct or t.is_space:
+                    continue
+                lemma = t.lemma_.strip()
+                if re.search(r"[a-z0-9]", lemma):
+                    kept.append(lemma)
+            return " ".join(kept)
+        return _clean
     except Exception:
-        return None
+        # safe fallback
+        return lambda t: " ".join(re.findall(r"[a-z0-9]+", str(t).lower()))
 
-nlp = get_spacy()
-
-def spacy_clean(text: str) -> str:
-    if nlp is None:
-        # safe fallback: lowercase, keep alphanumerics
-        toks = re.findall(r"[a-z0-9]+", str(text).lower())
-        return " ".join(toks)
-    doc = nlp(str(text).lower())
-    kept = []
-    for t in doc:
-        if t.is_stop or t.is_punct or t.is_space:
-            continue
-        lemma = t.lemma_.strip()
-        if re.search(r"[a-z0-9]", lemma):
-            kept.append(lemma)
-    return " ".join(kept)
-
-st.subheader("3) Build clean text (title + abstract → lemmas)")
-work["clean_text"] = (work[TITLE_COL].astype(str) + ". " + work[ABSTRACT_COL].astype(str)).apply(spacy_clean)
-st.dataframe(work[["clean_text"]].head(3), use_container_width=True)
-
-# ---- SBERT semantic scoring mapped to 1–5 ----
-@st.cache_resource(show_spinner=True)
-def get_sbert():
-    from sentence_transformers import SentenceTransformer, util  # noqa
-    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device="cpu")
-    return model
-
-from sentence_transformers import util as sbert_util  # only util is needed here
-model = get_sbert()
-
-st.subheader("4) SBERT rubric scoring → scale to 1–5")
-
-# embeddings
-abs_emb = model.encode(work["clean_text"].tolist(), convert_to_tensor=True, normalize_embeddings=True)
-prompt_emb = {k: model.encode(v, convert_to_tensor=True, normalize_embeddings=True) for k, v in RUBRIC.items()}
-
-# cosine similarities per criterion
-raw_scores = {}
-for crit in RUBRIC.keys():
-    sim = sbert_util.cos_sim(abs_emb, prompt_emb[crit]).cpu().numpy().ravel()
-    raw_scores[crit] = sim
-
-raw_df = pd.DataFrame(raw_scores)
-
-# scale each criterion to 1..5 using robust percentiles (matches your idea)
 def scale_to_1_5(col):
     q1, q99 = np.percentile(col, [1, 99])
-    col = np.clip(col, q1, q99)  # trim tails
+    col = np.clip(col, q1, q99)
     return 1 + 4 * (col - col.min()) / (col.max() - col.min() + 1e-9)
 
-scaled_df = raw_df.apply(scale_to_1_5).clip(lower=1, upper=5)
-work[["originality","clarity","rigor","impact","entrepreneurship"]] = scaled_df[["originality","clarity","rigor","impact","entrepreneurship"]]
-work["overall"] = scaled_df.mean(axis=1)
+def simple_autoscore(texts: pd.Series) -> pd.Series:
+    texts = texts.fillna("").astype(str)
+    L = texts.str.len()
+    U = texts.apply(lambda s: len(set(w.lower().strip(".,;:!?") for w in s.split() if w)))
+    L = (L - L.min()) / (L.max() - L.min() + 1e-9)
+    U = (U - U.min()) / (U.max() - U.min() + 1e-9)
+    return (0.6 * U + 0.4 * L) * 4 + 1  # map to 1..5 so tables look consistent
 
-st.dataframe(work[[TITLE_COL, "originality","clarity","rigor","impact","entrepreneurship","overall"]].head(10), use_container_width=True)
+def build_feedback_row(row):
+    def msg(score, hi, mid, low, very_low):
+        if score >= 5: return hi
+        if score >= 4: return mid
+        if score >= 3: return "The idea is okay, but needs more depth."
+        if score >= 2: return low
+        return very_low
+    parts = []
+    parts.append(msg(row["originality"],
+        "The idea is genuinely creative and stands out.",
+        "The idea is good and has some uniqueness.",
+        "The idea feels common. Show what makes it different.",
+        "The idea is not original. You need a clearer new angle.",
+    ))
+    parts.append(msg(row["clarity"],
+        "The abstract is clear, well-written, and easy to understand.",
+        "Mostly clear; a few sentences could be smoother.",
+        "It’s difficult to follow. Reorganize your explanation.",
+        "The abstract is confusing. Rewrite with simple, direct sentences.",
+    ))
+    parts.append(msg(row["rigor"],
+        "The methodology is well explained and realistic.",
+        "Clear but could use a bit more detail.",
+        "The plan is vague. Explain steps and tools you will use.",
+        "No clear method. Describe exactly how the work will be done.",
+    ))
+    parts.append(msg(row["impact"],
+        "The project has strong real-world value.",
+        "Relevant; clarify how it helps others.",
+        "The benefit is unclear. Explain who gains from this.",
+        "No real-world purpose is shown. Explain why this project matters.",
+    ))
+    parts.append(msg(row["entrepreneurship"],
+        "Shows strong problem-solving and practical thinking.",
+        "Good attempt at problem-solving; add more detail.",
+        "Needs a clearer plan for solving challenges.",
+        "No strategy is shown for solving problems. Explain your approach.",
+    ))
+    return textwrap.fill(" ".join(parts), 120)
 
-# ---- Simple explainable baseline: TF-IDF + LinearSVR using pseudo-labels ----
-st.subheader("5) Explainable baseline (TF-IDF → LinearSVR)")
+if not uploaded:
+    st.info("Upload a file to begin.")
+    st.stop()
 
-tfidf = TfidfVectorizer(max_features=30000, ngram_range=(1,2), min_df=3, sublinear_tf=True, lowercase=True)
-X = tfidf.fit_transform(work["clean_text"])
+# ---------- load & normalize ----------
+df = load_df(uploaded, sheet_name)
 
-idx = np.arange(X.shape[0])
-X_train, X_test, idx_train, idx_test = train_test_split(X, idx, test_size=0.15, random_state=42)
+# auto-detect your long headers
+title_col    = guess_col(df, ["title of your research", "capstone", "title"])
+abstract_col = guess_col(df, ["description", "abstract"])
 
-metrics_rows = []
-for crit in ["originality","clarity","rigor","impact","entrepreneurship"]:
-    y = work[crit].values
-    y_train, y_test = y[idx_train], y[idx_test]
-    reg = LinearSVR(C=1.0, epsilon=0.0, loss="squared_epsilon_insensitive", max_iter=5000, random_state=42)
-    reg.fit(X_train, y_train)
-    y_pred = np.clip(reg.predict(X_test), 1.0, 5.0)
-    metrics_rows.append([crit, mean_absolute_error(y_test, y_pred), r2_score(y_test, y_pred)])
-metrics_df = pd.DataFrame(metrics_rows, columns=["criterion","MAE","R2"])
-st.dataframe(metrics_df, use_container_width=True)
+st.info(f"Normalized columns: {{'{title_col}': 'title', '{abstract_col}': 'abstract'}}")
 
-# ---- Feedback per row (exactly your conditional style) ----
-def feedback_for_row(row):
-    s = row[["originality","clarity","rigor","impact","entrepreneurship","overall"]]
-    comments = []
-    # ORIGINIALITY
-    if s["originality"] >= 5: comments.append("The idea is genuinely creative and stands out.")
-    elif s["originality"] >= 4: comments.append("The idea is good and has some uniqueness.")
-    elif s["originality"] >= 3: comments.append("The idea is okay, but not very distinct.")
-    elif s["originality"] >= 2: comments.append("The idea feels common. Show what makes it different.")
-    else: comments.append("The idea is not original. You need a clearer new angle.")
+st.subheader("1) Original Data")
+st.write(f"({df.shape[0]}, {df.shape[1]})")
+st.dataframe(df.head(20), use_container_width=True)
 
-    # CLARITY
-    if s["clarity"] >= 5: comments.append("The abstract is clear, well-written, and easy to understand.")
-    elif s["clarity"] >= 4: comments.append("Mostly clear; a few sentences could be smoother.")
-    elif s["clarity"] >= 3: comments.append("Some parts are understandable, but the flow needs work.")
-    elif s["clarity"] >= 2: comments.append("It’s difficult to follow. Reorganize your explanation.")
-    else: comments.append("The abstract is confusing. Rewrite with simple, direct sentences.")
+# de-dup exactly like your notebook: title+abstract norm combo
+work = df.copy()
+work["_t_norm"] = normalize_series(work[title_col])
+work["_a_norm"] = normalize_series(work[abstract_col])
+before = len(work)
+work = work.drop_duplicates(subset=["_t_norm", "_a_norm"], keep="first").reset_index(drop=True)
+work = work.drop(columns=["_t_norm", "_a_norm"])
+st.success(f"Removed {before - len(work)} duplicate copies. Remaining: {len(work)}")
 
-    # RIGOR
-    if s["rigor"] >= 5: comments.append("The methodology is well explained and realistic.")
-    elif s["rigor"] >= 4: comments.append("Clear but could use a bit more detail.")
-    elif s["rigor"] >= 3: comments.append("The method is mentioned but not clearly explained.")
-    elif s["rigor"] >= 2: comments.append("The plan is vague. Explain steps and tools you will use.")
-    else: comments.append("No clear method. Describe exactly how the work will be done.")
+# ---------- scoring ----------
+st.subheader("2) Scoring")
+cleaner = spacy_cleaner()
+work["clean_text"] = (work[title_col].astype(str) + ". " + work[abstract_col].astype(str)).apply(cleaner)
 
-    # IMPACT
-    if s["impact"] >= 5: comments.append("The project has strong real-world value.")
-    elif s["impact"] >= 4: comments.append("Relevant; clarify how it helps others.")
-    elif s["impact"] >= 3: comments.append("Possible impact but not well explained.")
-    elif s["impact"] >= 2: comments.append("The benefit is unclear. Explain who gains from this.")
-    else: comments.append("No real-world purpose is shown. Explain why this project matters.")
+model, sbert_util = try_get_models()
+if model is not None:
+    st.write("Using **SBERT semantic rubric** (1–5).")
+    abs_emb = model.encode(work["clean_text"].tolist(), convert_to_tensor=True, normalize_embeddings=True)
+    prompt_emb = {k: model.encode(v, convert_to_tensor=True, normalize_embeddings=True) for k, v in RUBRIC.items()}
+    raw = {}
+    for crit in RUBRIC.keys():
+        sim = sbert_util.cos_sim(abs_emb, prompt_emb[crit]).cpu().numpy().ravel()
+        raw[crit] = sim
+    raw_df = pd.DataFrame(raw)
+    scaled = raw_df.apply(scale_to_1_5).clip(1, 5)
+    for c in ["originality","clarity","rigor","impact","entrepreneurship"]:
+        work[c] = scaled[c]
+else:
+    st.warning("SBERT not available on this environment; falling back to simple auto-score (scaled to 1–5).")
+    s = simple_autoscore(work["clean_text"])
+    for c in ["originality","clarity","rigor","impact","entrepreneurship"]:
+        work[c] = s
 
-    # ENTREPRENEURSHIP
-    if s["entrepreneurship"] >= 5: comments.append("Shows strong problem-solving and practical thinking.")
-    elif s["entrepreneurship"] >= 4: comments.append("Good attempt at problem-solving; add more detail.")
-    elif s["entrepreneurship"] >= 3: comments.append("A strategy is shown, but the plan is basic.")
-    elif s["entrepreneurship"] >= 2: comments.append("Needs a clearer plan for solving challenges.")
-    else: comments.append("No strategy is shown for solving problems. Explain your approach.")
+work["overall"] = work[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1).round(2)
 
-    return textwrap.fill(" ".join(comments), 120)
-
-# Build feedback frame ordered by overall
-feedback_df = work.copy()
-feedback_df = feedback_df.assign(
-    feedback = [feedback_for_row(r) for _, r in feedback_df.iterrows()]
-).sort_values("overall", ascending=False).reset_index(drop=True)
-
-# ---- Top 10 table like your output ----
-st.subheader("6) Top 10 Recommended Applicants (by overall)")
-top10 = feedback_df[[TITLE_COL,"originality","clarity","rigor","impact","entrepreneurship","overall","feedback"]].head(10).copy()
+# ---------- outputs you asked for ----------
+st.subheader("3) Top-10 with scores")
+top10 = (work
+         [[title_col, "originality","clarity","rigor","impact","entrepreneurship","overall"]]
+         .sort_values("overall", ascending=False)
+         .head(10)
+         .reset_index(drop=True))
 st.dataframe(top10, use_container_width=True)
 
-# ---- Downloads identical to your names ----
-TOP10_PATH = "rise_top10_recommended.csv"
-ALL_PATH  = "rise_feedback_all_applicants.csv"
+# feedback for ALL rows
+st.subheader("4) Feedback for ALL applicants (download)")
+all_feedback = work.copy()
+all_feedback["feedback"] = [build_feedback_row(r) for _, r in all_feedback.iterrows()]
+
+# tidy columns
+display_cols = [title_col, "originality","clarity","rigor","impact","entrepreneurship","overall","feedback"]
+top10_out = (all_feedback[display_cols]
+             .sort_values("overall", ascending=False)
+             .head(10)
+             .reset_index(drop=True)
+             .rename(columns={title_col: "title"}))
+
+all_out = (all_feedback[display_cols]
+           .rename(columns={title_col: "title"})
+           .reset_index(drop=True))
 
 c1, c2 = st.columns(2)
 with c1:
-    st.download_button("⬇️ Download Top-10 CSV", data=top10.to_csv(index=False, encoding="utf-8"), file_name=TOP10_PATH, mime="text/csv")
+    st.download_button(
+        "⬇️ Download Top-10 (CSV)",
+        data=top10_out.to_csv(index=False, encoding="utf-8"),
+        file_name="rise_top10_recommended.csv",
+        mime="text/csv",
+    )
 with c2:
-    # full dataset feedback (ensure required cols exist)
-    required_cols = [TITLE_COL, "originality","clarity","rigor","impact","entrepreneurship","overall","feedback"]
-    safe = feedback_df[required_cols].rename(columns={TITLE_COL:"title"})
-    st.download_button("⬇️ Download Feedback for ALL (CSV)", data=safe.to_csv(index=False, encoding="utf-8"),
-                       file_name=ALL_PATH, mime="text/csv")
+    st.download_button(
+        "⬇️ Download Feedback for ALL (CSV)",
+        data=all_out.to_csv(index=False, encoding="utf-8"),
+        file_name="rise_feedback_all_applicants.csv",
+        mime="text/csv",
+    )
 
-# ---- Optional quick EDA lengths (like your histograms) ----
-with st.expander("Optional: quick EDA (length histograms)"):
-    lens = pd.DataFrame({
-        "title_len":   work[TITLE_COL].astype(str).str.len(),
-        "abs_len":     work[ABSTRACT_COL].astype(str).str.len(),
-    })
-    chart1 = alt.Chart(lens).mark_bar().encode(alt.X("title_len:Q", bin=alt.Bin(maxbins=40)), y="count()").properties(height=160)
-    chart2 = alt.Chart(lens).mark_bar().encode(alt.X("abs_len:Q",   bin=alt.Bin(maxbins=40)), y="count()").properties(height=160)
-    st.altair_chart(chart1, use_container_width=True)
-    st.altair_chart(chart2, use_container_width=True)
+st.caption("Tip: If SBERT is missing on Streamlit Cloud, add `sentence-transformers`, `torch`, and `spacy` to requirements.txt.")
