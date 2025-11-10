@@ -69,7 +69,7 @@ with col_left:
 with col_right:
     st.markdown("<div class='logo-box'>", unsafe_allow_html=True)
     # Place your logo at: ./static/georgian_logo.png
-    st.image("static/georgian_logo.png", caption=None, use_container_width=True)
+    st.image("georgian_logo.png", caption=None, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ========================= Upload ==============================
