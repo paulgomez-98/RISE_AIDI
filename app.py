@@ -1,5 +1,4 @@
-# app.py — RISE Smart Scoring (Groq LLaMA via requests)
-# Uses EXACT two columns you specified; robust header matching; no sidebar.
+# app.py — RISE Smart Scoring (Groq LLaMA via requests, fixed title, Top-K slider)
 
 import os, re, json, requests
 import pandas as pd
@@ -11,7 +10,7 @@ st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 left, right = st.columns([5, 1])
 with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
-    st.write("Upload CSV/XLSX → score with LLaMA → see Top-10 & export results.")
+    st.write("Upload CSV/XLSX → score with LLaMA → see Top-K & export results.")
 with right:
     # Logo from static or optional URL secret/env
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
@@ -55,39 +54,40 @@ if df.empty:
     st.stop()
 
 # ---------------- EXACT column selection ----------------
-# The two headers we MUST use:
+# These are the two column titles we MUST use from your sheet:
 TARGET_TITLE = "What is the title of your research/capstone project?"
 TARGET_ABS   = "Please provide a description or abstract of your research."
 
 def norm(s: str) -> str:
-    """lowercase, collapse spaces, trim punctuation-like whitespace"""
+    """lowercase + collapse spaces for robust matching."""
     s = re.sub(r"\s+", " ", str(s)).strip().lower()
     s = s.replace("’", "'")
     return s
 
-want = {norm(TARGET_TITLE): "title", norm(TARGET_ABS): "abstract"}
-
-# Build a map of normalized header -> original header in file
+want_norm = {norm(TARGET_TITLE): "title", norm(TARGET_ABS): "abstract"}
 norm2orig = {norm(c): c for c in df.columns}
 
-missing = [orig for key, orig in [(TARGET_TITLE, TARGET_TITLE), (TARGET_ABS, TARGET_ABS)]
-           if norm(orig) not in norm2orig]
+missing = []
+if norm(TARGET_TITLE) not in norm2orig:
+    missing.append(TARGET_TITLE)
+if norm(TARGET_ABS) not in norm2orig:
+    missing.append(TARGET_ABS)
 
 if missing:
-    # Try soft match (sometimes extra spaces/case changes); show helpful info
     st.error(
         "Required column(s) not found:\n\n"
         + "\n".join([f"• {m}" for m in missing])
         + "\n\nHeaders found in your file:\n"
         + "\n".join([f"- {c}" for c in df.columns])
-        + "\n\nPlease ensure your Excel/CSV uses the exact headers above (minor spacing/case is okay)."
     )
     st.stop()
 
 title_col = norm2orig[norm(TARGET_TITLE)]
 abs_col   = norm2orig[norm(TARGET_ABS)]
 
+# Keep only the two required columns
 work = df[[title_col, abs_col]].copy()
+# Rename to fixed internal names
 work.columns = ["title", "abstract"]
 
 # Clean obvious junk
@@ -106,7 +106,7 @@ if len(dupes) > 0:
     chosen = st.selectbox("Select a repeated title to view:", dup_titles)
     st.dataframe(dupes[dupes["title"] == chosen][["title", "abstract"]], use_container_width=True)
 
-# keep first instance of each title
+# Keep first instance of each title
 work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
 # ---------------- Secrets / runtime config ----------------
@@ -135,19 +135,21 @@ LLAMA_MAX_TOKENS = int(get("LLAMA_MAX_TOKENS", 256))
 
 # ---------------- LLaMA scoring via requests ----------------
 def llama_score(title: str, abstract: str) -> dict:
+    # Strict instruction: no title field in JSON
     prompt = f"""
-You are a strict judge for a student research competition (RISE).
-Score the project from 1 (very weak) to 5 (excellent) on five criteria.
+You are scoring a student research project.
 
-Return ONLY compact JSON with keys:
-title, originality, clarity, rigor, impact, entrepreneurship, feedback
+Return ONLY a compact JSON object like this (no extra text):
+{{
+  "originality": 1-5 number,
+  "clarity": 1-5 number,
+  "rigor": 1-5 number,
+  "impact": 1-5 number,
+  "entrepreneurship": 1-5 number,
+  "feedback": "one short feedback sentence"
+}}
 
-Definitions:
-- originality: novelty of ideas
-- clarity: writing quality & structure
-- rigor: soundness of method/plan
-- impact: potential real-world benefit
-- entrepreneurship: practical problem-solving initiative
+DO NOT return a 'title' field.
 
 Title: {title}
 Abstract: {abstract}
@@ -164,18 +166,20 @@ Abstract: {abstract}
     r.raise_for_status()
     content = r.json()["choices"][0]["message"]["content"]
     content = re.sub(r"```json|```", "", content).strip()
+
     try:
         data = json.loads(content)
-        # coerce numbers
+        # Coerce numeric fields
         for k in ["originality", "clarity", "rigor", "impact", "entrepreneurship"]:
             data[k] = float(data.get(k, 3))
-        data["title"] = str(data.get("title", title))[:300]
+        # IMPORTANT: always keep the original CSV title
+        data["title"] = title
         data["feedback"] = str(data.get("feedback", "")).strip()
         return data
     except Exception:
-        # safe fallback if model returns malformed JSON
+        # Safe fallback if model returns malformed JSON
         return {
-            "title": title,
+            "title": title,  # keep CSV title
             "originality": 3.0,
             "clarity": 3.0,
             "rigor": 3.0,
@@ -195,7 +199,7 @@ for i, row in work.iterrows():
         results.append(llama_score(row["title"], row["abstract"]))
     except Exception:
         results.append({
-            "title": row["title"],
+            "title": row["title"],  # keep CSV title
             "originality": 3.0, "clarity": 3.0, "rigor": 3.0,
             "impact": 3.0, "entrepreneurship": 3.0, "feedback": ""
         })
@@ -204,7 +208,7 @@ for i, row in work.iterrows():
 scored = pd.DataFrame(results)
 scored["overall"] = scored[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1).round(2)
 
-# ---------------- Legends + Top-10 ----------------
+# ---------------- Legends ----------------
 with st.expander("Scoring Legends (1–5)", expanded=True):
     st.write(
         "- **1** Very weak • **2** Weak • **3** Adequate • **4** Strong • **5** Excellent\n"
@@ -215,8 +219,10 @@ with st.expander("Scoring Legends (1–5)", expanded=True):
         "- **Entrepreneurship** — Practical problem-solving & initiative"
     )
 
+# ---------------- Top-K slider + display ----------------
 st.subheader("Top Ranks")
-TOP_K = 10
+TOP_K = st.slider("How many top ranks to display?", min_value=5, max_value=50, value=10, step=5)
+
 top = scored.sort_values("overall", ascending=False).reset_index(drop=True)
 
 st.markdown(f"**Top-{TOP_K} recommended**")
@@ -226,9 +232,10 @@ st.dataframe(
 )
 
 if len(top) > 0:
-    pick = st.selectbox("View scores for a Top-10 project:", top.head(TOP_K)["title"].tolist())
+    pick = st.selectbox("View scores for a Top-K project:", top.head(TOP_K)["title"].tolist())
     sel = top[top["title"] == pick].iloc[0]
     st.write(
+        f"**Title:** {sel['title']}\n\n"
         f"**Overall:** {sel['overall']}  |  "
         f"Originality {sel['originality']:.1f} • Clarity {sel['clarity']:.1f} • "
         f"Rigor {sel['rigor']:.1f} • Impact {sel['impact']:.1f} • "
@@ -237,7 +244,7 @@ if len(top) > 0:
     if str(sel.get("feedback", "")).strip():
         st.caption(f"Feedback: {sel['feedback']}")
 
-# ---------------- All results + right-side downloads --------
+# ---------------- All results + downloads (right) --------
 st.subheader("All Results")
 display_cols = ["title","originality","clarity","rigor","impact","entrepreneurship","overall","feedback"]
 st.dataframe(top[display_cols], use_container_width=True)
@@ -247,9 +254,9 @@ with dl:
     c1, c2 = st.columns(2)
     with c1:
         st.download_button(
-            "⬇️ Download Top-10 (CSV)",
+            "⬇️ Download Top-K (CSV)",
             top.head(TOP_K)[display_cols].to_csv(index=False, encoding="utf-8"),
-            file_name="rise_top10.csv",
+            file_name=f"rise_top_{TOP_K}.csv",
             mime="text/csv",
         )
     with c2:
