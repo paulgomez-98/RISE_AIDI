@@ -1,26 +1,30 @@
-# ============================================================
-# app.py — RISE Smart Scoring (Batched + Parallel + Fast + Stable)
-# ============================================================
+# app.py — RISE Smart Scoring (Default Theme + Stable API + EDA + Logo)
+# - Default Streamlit theme
+# - Georgian logo preserved
+# - Retry-safe API calls
+# - EDA + duplicate detection BEFORE scoring
+# - Positive, constructive feedback for all applicants
+# - No calibration
+# - Single-file deployment
 
 import os, re, json, requests, time, random
 import numpy as np
 import pandas as pd
 import streamlit as st
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# PAGE CONFIG
+#                    PAGE CONFIG
 # ============================================================
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
 # ============================================================
-# HEADER + LOGO
+#                    HEADER + LOGO
 # ============================================================
 left, right = st.columns([5,1])
 with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
-    st.write("Upload → Check Duplicates → Score (Fast Mode) → Results → Download")
+    st.write("Upload → EDA → Score using LLaMA → Results → Download")
 
 with right:
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
@@ -46,7 +50,7 @@ with right:
         st.caption("")
 
 # ============================================================
-# CONSTANTS
+#                    CONSTANTS
 # ============================================================
 TARGET_TITLE = "What is the title of your research/capstone project?"
 TARGET_ABS   = "Please provide a description or abstract of your research."
@@ -54,58 +58,33 @@ TARGET_ABS   = "Please provide a description or abstract of your research."
 MODEL_NAME  = "llama-3.1-8b-instant"
 GROQ_URL    = "https://api.groq.com/openai/v1"
 TEMPERATURE = 0.1
-MAX_TOKENS  = 300   # reduced because feedback is short
-BATCH_SIZE  = 5
-MAX_THREADS = 10
+MAX_TOKENS  = 256
 
 def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-# BATCH PROMPT (SHORT FEEDBACK)
+#          SAFE + RETRYING LLaMA CALL (Fixes API failures)
 # ============================================================
-def build_batch_prompt(batch):
-    items = []
-    for entry in batch:
-        items.append({
-            "title": entry["title"],
-            "abstract": entry["abstract"]
-        })
+def llama_score(title, abstract, api_key):
 
-    return f"""
-You are evaluating student research projects.  
-For EACH project, return one JSON object inside a JSON LIST.
+    # POSITIVE + SUGGESTION FEEDBACK STYLE
+    prompt = f"""
+You are evaluating a student project. Provide scores and a helpful, encouraging comment.
 
-FEEDBACK RULES:
-- Begin with a positive supportive sentence.
-- Add **ONE** short suggestion ONLY if needed.
-- Total feedback length MUST be **max 2 sentences**.
-- DO NOT add text outside the JSON list.
+Return ONLY this JSON:
+{{
+  "originality": 1-5,
+  "clarity": 1-5,
+  "rigor": 1-5,
+  "impact": 1-5,
+  "entrepreneurship": 1-5,
+  "feedback": "Start with a positive sentence. Give suggestions ONLY if necessary. Keep it short."
+}}
 
-Return EXACTLY this format:
-[
-  {{
-    "title": "...",
-    "originality": 1-5,
-    "clarity": 1-5,
-    "rigor": 1-5,
-    "impact": 1-5,
-    "entrepreneurship": 1-5,
-    "feedback": "2-sentence constructive feedback"
-  }},
-  ...
-]
-
-Projects:
-{json.dumps(items, indent=2)}
+Title: {title}
+Abstract: {abstract}
 """
-
-# ============================================================
-# SAFE BATCH CALL
-# ============================================================
-def llama_score_batch(batch, api_key):
-
-    prompt = build_batch_prompt(batch)
 
     url = GROQ_URL + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -117,9 +96,10 @@ def llama_score_batch(batch, api_key):
         "max_tokens": MAX_TOKENS,
     }
 
+    # Retry Mechanism
     for attempt in range(5):
         try:
-            r = requests.post(url, headers=headers, json=payload, timeout=90)
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
 
             if r.status_code == 429:
                 time.sleep(2 ** attempt + random.random())
@@ -128,39 +108,35 @@ def llama_score_batch(batch, api_key):
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"]
             cleaned = re.sub(r"```json|```", "", raw).strip()
-            data_list = json.loads(cleaned)
+            data = json.loads(cleaned)
 
-            results = []
-            for obj in data_list:
-                results.append({
-                    "success": True,
-                    "title": obj.get("title", ""),
-                    "originality": float(obj.get("originality", 3)),
-                    "clarity": float(obj.get("clarity", 3)),
-                    "rigor": float(obj.get("rigor", 3)),
-                    "impact": float(obj.get("impact", 3)),
-                    "entrepreneurship": float(obj.get("entrepreneurship", 3)),
-                    "feedback": obj.get("feedback", "").strip()
-                })
-
-            return results
+            return {
+                "success": True,
+                "title": title,
+                "originality": float(data.get("originality", 3)),
+                "clarity": float(data.get("clarity", 3)),
+                "rigor": float(data.get("rigor", 3)),
+                "impact": float(data.get("impact", 3)),
+                "entrepreneurship": float(data.get("entrepreneurship", 3)),
+                "feedback": data.get("feedback","").strip()
+            }
 
         except Exception:
             time.sleep(2 ** attempt + random.random())
 
-    return [{
+    return {
         "success": False,
-        "title": x["title"],
+        "title": title,
         "originality": 0,
         "clarity": 0,
         "rigor": 0,
         "impact": 0,
         "entrepreneurship": 0,
-        "feedback": "API ERROR — batch scoring failed after retries."
-    } for x in batch]
+        "feedback": "API ERROR — scoring failed after retries."
+    }
 
 # ============================================================
-# FILE UPLOAD
+#                    FILE UPLOAD
 # ============================================================
 file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
 if not file:
@@ -172,7 +148,7 @@ if df.empty:
     st.stop()
 
 # ============================================================
-# COLUMN VALIDATION
+#                    COLUMN VALIDATION
 # ============================================================
 normmap = {norm(c): c for c in df.columns}
 missing = []
@@ -190,65 +166,80 @@ abs_col   = normmap[norm(TARGET_ABS)]
 work = df[[title_col, abs_col]].copy()
 work.columns = ["title","abstract"]
 
+# Clean
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
+
+# Limit abstract length for API safety
 work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
 
 # ============================================================
-# BASIC EDA
+#                    EDA BEFORE SCORING
 # ============================================================
-st.subheader("📊 File Summary (Before Scoring)")
+st.subheader("📊 Exploratory Data Analysis (Before Scoring)")
 
 total_rows = len(work)
 unique_titles = work["title"].nunique()
 
-st.markdown(f"**Total rows:** {total_rows}  \n**Unique titles:** {unique_titles}")
-
+# Duplicates
 norm_titles = work["title"].str.lower().str.replace(r"\s+"," ", regex=True)
-dupes = work[norm_titles.duplicated(keep=False)]
+duplicate_mask = norm_titles.duplicated(keep=False)
+dupes = work[duplicate_mask]
 
+missing_abs = (work["abstract"].str.len() == 0).sum()
+
+title_len = work["title"].str.len()
+abs_len = work["abstract"].str.len()
+
+st.markdown(f"""
+**Total rows:** {total_rows}  
+**Unique project titles:** {unique_titles}  
+**Duplicate titles:** {len(dupes)}  
+**Missing abstracts:** {missing_abs}  
+""")
+
+# Show duplicates if any
 if len(dupes) > 0:
-    st.warning(f"⚠️ Duplicate project titles detected ({len(dupes)} entries):")
+    st.warning("💡 Duplicate project titles found:")
     st.dataframe(dupes, use_container_width=True)
-else:
-    st.success("No duplicate project titles found.")
 
-work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
+# EDA Stats
+st.markdown("### 🔎 Text statistics")
+st.write(pd.DataFrame({
+    "Metric": ["Title length (chars)", "Abstract length (chars)"],
+    "Min": [title_len.min(), abs_len.min()],
+    "Mean": [title_len.mean(), abs_len.mean()],
+    "Max": [title_len.max(), abs_len.max()]
+}))
 
 # ============================================================
-# API KEY
+#                    API KEY INPUT
 # ============================================================
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter GROQ API Key", type="password")
 if not api_key:
     st.stop()
 
 # ============================================================
-# PARALLEL SCORING
+#                    SCORING LOOP
 # ============================================================
-st.subheader("🔄 Scoring with LLaMA (Fast Mode)…")
-
-batches = [
-    work.iloc[i:i+BATCH_SIZE].to_dict(orient="records")
-    for i in range(0, len(work), BATCH_SIZE)
-]
+st.subheader("🔄 Scoring with LLaMA…")
 
 results = []
 prog = st.progress(0.0)
 
-with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-    futures = {executor.submit(llama_score_batch, batch, api_key): batch for batch in batches}
+for i, row in work.iterrows():
 
-    completed = 0
-    for future in as_completed(futures):
-        batch_results = future.result()
-        results.extend(batch_results)
-        completed += 1
-        prog.progress(completed / len(batches))
+    results.append(llama_score(row["title"], row["abstract"], api_key))
+
+    # Throttle to avoid Groq rate limits
+    time.sleep(0.3 + random.random()/4)
+
+    prog.progress((i+1)/len(work))
 
 scored = pd.DataFrame(results)
 
 # ============================================================
-# API FAILURES
+#                    API FAILURES
 # ============================================================
 failed = scored[scored["success"] == False]
 if not failed.empty:
@@ -256,14 +247,14 @@ if not failed.empty:
     st.dataframe(failed[["title","feedback"]])
 
 # ============================================================
-# OVERALL SCORE
+#                    OVERALL SCORE
 # ============================================================
 weights = np.ones(5) / 5
 crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_numpy(float)
 scored["overall"] = (crit @ weights).round(2)
 
 # ============================================================
-# TOP-K
+#                    TOP-K
 # ============================================================
 st.subheader("🏆 Top Rankings")
 
@@ -274,7 +265,7 @@ st.dataframe(top.head(TOP_K)[[
     "title","overall","originality","clarity","rigor","impact","entrepreneurship"
 ]])
 
-pick = st.selectbox("View details of:", top.head(TOP_K)["title"].tolist())
+pick = st.selectbox("View details:", top.head(TOP_K)["title"].tolist())
 sel = top[top["title"] == pick].iloc[0]
 
 st.write(f"""
@@ -292,7 +283,7 @@ st.write(f"""
 st.caption("Feedback: " + sel["feedback"])
 
 # ============================================================
-# ALL RESULTS
+#                    ALL RESULTS
 # ============================================================
 st.subheader("📄 All Scored Results")
 
@@ -304,7 +295,7 @@ display_cols = [
 st.dataframe(top[display_cols], use_container_width=True)
 
 # ============================================================
-# DOWNLOAD BUTTONS
+#                    DOWNLOAD BUTTONS
 # ============================================================
 st.download_button(
     "⬇️ Download Top-K (CSV)",
