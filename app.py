@@ -1,31 +1,36 @@
-# app.py — RISE Smart Scoring (Default Theme + Stable API + Basic EDA + Logo)
+# ============================================================
+# app.py — RISE Smart Scoring (Batched + Parallel + Fast + Stable)
+# ============================================================
 # - Default Streamlit theme
 # - Georgian logo preserved
+# - Batch scoring (5 per request)
+# - Parallel execution (10 threads)
 # - Retry-safe API calls
-# - Only basic EDA (no text stats)
-# - Duplicate detection BEFORE scoring
-# - Positive, constructive feedback
+# - Basic EDA (duplicates only)
+# - Detailed paragraph feedback
 # - No calibration
 # - Single-file deployment
+# ============================================================
 
 import os, re, json, requests, time, random
 import numpy as np
 import pandas as pd
 import streamlit as st
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-#                    PAGE CONFIG
+# PAGE CONFIG
 # ============================================================
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
 # ============================================================
-#                    HEADER + LOGO
+# HEADER + LOGO
 # ============================================================
 left, right = st.columns([5,1])
 with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
-    st.write("Upload → Check Duplicates → Score with LLaMA → Results → Download")
+    st.write("Upload → Check Duplicates → Score (Fast Mode) → Results → Download")
 
 with right:
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
@@ -51,7 +56,7 @@ with right:
         st.caption("")
 
 # ============================================================
-#                    CONSTANTS
+# CONSTANTS
 # ============================================================
 TARGET_TITLE = "What is the title of your research/capstone project?"
 TARGET_ABS   = "Please provide a description or abstract of your research."
@@ -59,33 +64,60 @@ TARGET_ABS   = "Please provide a description or abstract of your research."
 MODEL_NAME  = "llama-3.1-8b-instant"
 GROQ_URL    = "https://api.groq.com/openai/v1"
 TEMPERATURE = 0.1
-MAX_TOKENS  = 256
+MAX_TOKENS  = 512   # Increased for batch feedback
+BATCH_SIZE  = 5
+MAX_THREADS = 10
 
 def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-#            SAFE LLaMA CALL WITH RETRY (API stabilization)
+# BATCHED PROMPT BUILDER
 # ============================================================
-def llama_score(title, abstract, api_key):
+def build_batch_prompt(batch):
+    items = []
+    for entry in batch:
+        items.append({
+            "title": entry["title"],
+            "abstract": entry["abstract"]
+        })
 
-    # Positive feedback requirement
-    prompt = f"""
-You are evaluating a student project. Provide scores and a helpful, encouraging comment.
+    # JSON list with title included — as requested
+    return f"""
+You are evaluating a batch of student research projects. 
+For EACH project, return ONE detailed JSON object inside a JSON LIST.
 
-Return ONLY this JSON:
-{{
-  "originality": 1-5,
-  "clarity": 1-5,
-  "rigor": 1-5,
-  "impact": 1-5,
-  "entrepreneurship": 1-5,
-  "feedback": "Start with a positive sentence. Give suggestions ONLY if needed. Keep it short and helpful."
-}}
+Rules for feedback:
+- Begin with a positive, encouraging sentence
+- Provide 2–3 sentences of guidance
+- Suggestions ONLY if needed
+- Keep tone supportive and helpful
+- DO NOT add extra text outside the JSON list
 
-Title: {title}
-Abstract: {abstract}
+Return ONLY a JSON list like this:
+[
+  {{
+    "title": "...",
+    "originality": 1-5,
+    "clarity": 1-5,
+    "rigor": 1-5,
+    "impact": 1-5,
+    "entrepreneurship": 1-5,
+    "feedback": "3–5 sentence constructive paragraph"
+  }},
+  ...
+]
+
+Projects to score:
+{json.dumps(items, indent=2)}
 """
+
+# ============================================================
+# SAFE API CALL (BATCHED)
+# ============================================================
+def llama_score_batch(batch, api_key):
+
+    prompt = build_batch_prompt(batch)
 
     url = GROQ_URL + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -97,10 +129,9 @@ Abstract: {abstract}
         "max_tokens": MAX_TOKENS,
     }
 
-    # Retry mechanism
     for attempt in range(5):
         try:
-            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            r = requests.post(url, headers=headers, json=payload, timeout=90)
 
             if r.status_code == 429:
                 time.sleep(2 ** attempt + random.random())
@@ -109,35 +140,41 @@ Abstract: {abstract}
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"]
             cleaned = re.sub(r"```json|```", "", raw).strip()
-            data = json.loads(cleaned)
 
-            return {
-                "success": True,
-                "title": title,
-                "originality": float(data.get("originality", 3)),
-                "clarity": float(data.get("clarity", 3)),
-                "rigor": float(data.get("rigor", 3)),
-                "impact": float(data.get("impact", 3)),
-                "entrepreneurship": float(data.get("entrepreneurship", 3)),
-                "feedback": data.get("feedback","").strip()
-            }
+            data_list = json.loads(cleaned)
+
+            results = []
+            for obj in data_list:
+                results.append({
+                    "success": True,
+                    "title": obj.get("title", ""),
+                    "originality": float(obj.get("originality", 3)),
+                    "clarity": float(obj.get("clarity", 3)),
+                    "rigor": float(obj.get("rigor", 3)),
+                    "impact": float(obj.get("impact", 3)),
+                    "entrepreneurship": float(obj.get("entrepreneurship", 3)),
+                    "feedback": obj.get("feedback", "").strip()
+                })
+
+            return results
 
         except Exception:
             time.sleep(2 ** attempt + random.random())
 
-    return {
+    # On failure, return fallback entries for each in batch
+    return [{
         "success": False,
-        "title": title,
+        "title": x["title"],
         "originality": 0,
         "clarity": 0,
         "rigor": 0,
         "impact": 0,
         "entrepreneurship": 0,
-        "feedback": "API ERROR — scoring failed after retries."
-    }
+        "feedback": "API ERROR — batch scoring failed after retries."
+    } for x in batch]
 
 # ============================================================
-#                    FILE UPLOAD
+# FILE UPLOAD
 # ============================================================
 file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
 if not file:
@@ -149,7 +186,7 @@ if df.empty:
     st.stop()
 
 # ============================================================
-#                    COLUMN VALIDATION
+# COLUMN VALIDATION
 # ============================================================
 normmap = {norm(c): c for c in df.columns}
 missing = []
@@ -170,27 +207,20 @@ work.columns = ["title","abstract"]
 # Clean
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
-
-# Truncate abstract for API safety
-work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
+work["abstract"] = work["abstract"].apply(lambda x: x[:1500])  # Safety
 
 # ============================================================
-#                BASIC EDA (NO TEXT ANALYSIS)
+# BASIC EDA
 # ============================================================
 st.subheader("📊 File Summary (Before Scoring)")
 
 total_rows = len(work)
 unique_titles = work["title"].nunique()
 
-st.markdown(f"""
-**Total rows:** {total_rows}  
-**Unique titles:** {unique_titles}  
-""")
+st.markdown(f"**Total rows:** {total_rows}  \n**Unique titles:** {unique_titles}")
 
-# Detect duplicates ONLY
 norm_titles = work["title"].str.lower().str.replace(r"\s+"," ", regex=True)
-duplicate_mask = norm_titles.duplicated(keep=False)
-dupes = work[duplicate_mask]
+dupes = work[norm_titles.duplicated(keep=False)]
 
 if len(dupes) > 0:
     st.warning(f"⚠️ Duplicate project titles detected ({len(dupes)} entries):")
@@ -198,34 +228,43 @@ if len(dupes) > 0:
 else:
     st.success("No duplicate project titles found.")
 
+# Remove duplicates for scoring
+work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
+
 # ============================================================
-#                    API KEY INPUT
+# API KEY
 # ============================================================
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter GROQ API Key", type="password")
 if not api_key:
     st.stop()
 
 # ============================================================
-#                    SCORING SECTION
+# BATCHING + PARALLEL SCORING
 # ============================================================
-st.subheader("🔄 Scoring with LLaMA…")
+st.subheader("🔄 Scoring with LLaMA (Fast Mode)…")
+
+batches = [
+    work.iloc[i:i+BATCH_SIZE].to_dict(orient="records")
+    for i in range(0, len(work), BATCH_SIZE)
+]
 
 results = []
 prog = st.progress(0.0)
 
-for i, row in work.iterrows():
+with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+    futures = {executor.submit(llama_score_batch, batch, api_key): batch for batch in batches}
 
-    results.append(llama_score(row["title"], row["abstract"], api_key))
-
-    # Throttle to avoid Groq rate limits
-    time.sleep(0.25 + random.random()/4)
-
-    prog.progress((i+1)/len(work))
+    completed = 0
+    for future in as_completed(futures):
+        batch_results = future.result()
+        results.extend(batch_results)
+        completed += 1
+        prog.progress(completed / len(batches))
 
 scored = pd.DataFrame(results)
 
 # ============================================================
-#                    API FAILURES
+# API FAILURES
 # ============================================================
 failed = scored[scored["success"] == False]
 if not failed.empty:
@@ -233,14 +272,14 @@ if not failed.empty:
     st.dataframe(failed[["title","feedback"]])
 
 # ============================================================
-#                    OVERALL SCORE (Equal weights)
+# OVERALL SCORE
 # ============================================================
 weights = np.ones(5) / 5
 crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_numpy(float)
 scored["overall"] = (crit @ weights).round(2)
 
 # ============================================================
-#                    TOP-K RESULTS
+# TOP-K
 # ============================================================
 st.subheader("🏆 Top Rankings")
 
@@ -269,7 +308,7 @@ st.write(f"""
 st.caption("Feedback: " + sel["feedback"])
 
 # ============================================================
-#                    ALL RESULTS TABLE
+# ALL RESULTS
 # ============================================================
 st.subheader("📄 All Scored Results")
 
@@ -281,7 +320,7 @@ display_cols = [
 st.dataframe(top[display_cols], use_container_width=True)
 
 # ============================================================
-#                    DOWNLOAD BUTTONS
+# DOWNLOAD BUTTONS
 # ============================================================
 st.download_button(
     "⬇️ Download Top-K (CSV)",
