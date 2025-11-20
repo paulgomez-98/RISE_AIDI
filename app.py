@@ -11,20 +11,6 @@ import pandas as pd
 import streamlit as st
 from pathlib import Path
 
-# ============================================================
-#                    FORCE WHITE BACKGROUND
-# ============================================================
-white_bg_css = """
-<style>
-    .stApp { background-color: white !important; }
-    section[data-testid="stSidebar"] { background-color: white !important; }
-    .st-emotion-cache-1jicfl2 { background-color: white !important; }
-    div.block-container { background-color: white !important; }
-    .stDataFrame, .stTable { background-color: white !important; }
-    .stTextInput, .stFileUploader, .stSelectbox { background-color: white !important; }
-</style>
-"""
-st.markdown(white_bg_css, unsafe_allow_html=True)
 
 # ============================================================
 #                    PAGE CONFIG
@@ -261,3 +247,4 @@ st.download_button(
     file_name="rise_all_scored.csv",
     mime="text/csv"
 )
+
