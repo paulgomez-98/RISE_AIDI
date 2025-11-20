@@ -1,8 +1,9 @@
-# app.py — RISE Smart Scoring (Default Theme + Stable API + Logo)
+# app.py — RISE Smart Scoring (Default Theme + Stable API + Logo + EDA)
 # - Default Streamlit theme (no overrides)
 # - Georgian logo preserved
-# - Retry-safe API calls (fixes failing after few requests)
+# - Retry-safe API calls
 # - Gentle throttling to avoid Groq rate limits
+# - EDA section added (duplicate detection + summary)
 # - Feedback for ALL applicants
 # - Failed API results shown
 # - No calibration
@@ -15,17 +16,17 @@ import streamlit as st
 from pathlib import Path
 
 # ============================================================
-#                    PAGE CONFIG
+# PAGE CONFIG
 # ============================================================
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
 # ============================================================
-#                    HEADER + LOGO
+# HEADER + LOGO
 # ============================================================
 left, right = st.columns([5,1])
 with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
-    st.write("Upload → Score using LLaMA → View Top-K → View All → Download")
+    st.write("Upload → EDA → Score using LLaMA → View Top-K → View All → Download")
 
 with right:
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
@@ -51,7 +52,7 @@ with right:
         st.caption("")
 
 # ============================================================
-#                    CONSTANTS
+# CONSTANTS
 # ============================================================
 TARGET_TITLE = "What is the title of your research/capstone project?"
 TARGET_ABS   = "Please provide a description or abstract of your research."
@@ -65,9 +66,10 @@ def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-#        SAFE + RETRYING LLaMA CALL (FIXES API FAILURES)
+# SAFE + RETRYING LLaMA CALL (STABLE)
 # ============================================================
 def llama_score(title, abstract, api_key):
+
     prompt = f"""
 You are scoring a student research project.
 
@@ -78,7 +80,7 @@ Return ONLY JSON:
   "rigor": 1-5,
   "impact": 1-5,
   "entrepreneurship": 1-5,
-  "feedback": "one constructive feedback sentence"
+  "feedback": "one short constructive feedback sentence"
 }}
 
 Title: {title}
@@ -94,12 +96,10 @@ Abstract: {abstract}
         "max_tokens": MAX_TOKENS,
     }
 
-    # Retry loop — exponential backoff
     for attempt in range(5):
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=60)
 
-            # Rate limit handling
             if r.status_code == 429:
                 time.sleep(2 ** attempt + random.random())
                 continue
@@ -107,12 +107,7 @@ Abstract: {abstract}
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"]
             cleaned = re.sub(r"```json|```", "", raw).strip()
-
-            try:
-                data = json.loads(cleaned)
-            except:
-                # Model returned malformed JSON
-                raise ValueError("Bad JSON")
+            data = json.loads(cleaned)
 
             return {
                 "success": True,
@@ -128,7 +123,6 @@ Abstract: {abstract}
         except Exception:
             time.sleep(2 ** attempt + random.random())
 
-    # After all retries fail
     return {
         "success": False,
         "title": title,
@@ -141,7 +135,7 @@ Abstract: {abstract}
     }
 
 # ============================================================
-#                    FILE UPLOAD
+# FILE UPLOAD
 # ============================================================
 file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
 if not file:
@@ -153,7 +147,7 @@ if df.empty:
     st.stop()
 
 # ============================================================
-#                    COLUMN VALIDATION
+# COLUMN VALIDATION
 # ============================================================
 normmap = {norm(c): c for c in df.columns}
 missing = []
@@ -173,22 +167,46 @@ work.columns = ["title","abstract"]
 
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
-
-# very long abstracts cause token overload → truncate safely
 work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
-
 work = work[work["title"].str.len() >= 3]
+
+# ============================================================
+# E D A   S E C T I O N
+# ============================================================
+st.subheader("📊 EDA — File Summary")
+
+total_rows = len(work)
+unique_titles = work["title"].nunique()
+duplicate_count = total_rows - unique_titles
+
+st.markdown(f"""
+**Total rows:** {total_rows}  
+**Unique titles:** {unique_titles}  
+**Duplicate title entries:** {duplicate_count}  
+""")
+
+# Duplicate table
+norm_titles = work["title"].str.lower().str.replace(r"\s+"," ", regex=True)
+dupes = work[norm_titles.duplicated(keep=False)]
+
+if duplicate_count > 0:
+    st.warning(f"⚠️ {duplicate_count} duplicates found. Showing duplicate rows below:")
+    st.dataframe(dupes, use_container_width=True)
+else:
+    st.success("No duplicate project titles found.")
+
+# Remove duplicates for scoring
 work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
 # ============================================================
-#                    API KEY INPUT
+# API KEY
 # ============================================================
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter GROQ API Key", type="password")
 if not api_key:
     st.stop()
 
 # ============================================================
-#                    SCORING LOOP  (WITH THROTTLING)
+# SCORING
 # ============================================================
 st.subheader("Scoring with LLaMA…")
 
@@ -198,15 +216,13 @@ prog = st.progress(0.0)
 for i, row in work.iterrows():
     results.append(llama_score(row["title"], row["abstract"], api_key))
 
-    # Throttle slightly to avoid rate limits
-    time.sleep(0.3 + random.random()/5)
-
+    time.sleep(0.3 + random.random()/5)  # avoid rate limits
     prog.progress((i+1)/len(work))
 
 scored = pd.DataFrame(results)
 
 # ============================================================
-#                    API FAILURES
+# API FAILURES
 # ============================================================
 failed = scored[scored["success"] == False]
 if not failed.empty:
@@ -214,14 +230,14 @@ if not failed.empty:
     st.dataframe(failed[["title","feedback"]])
 
 # ============================================================
-#                    OVERALL SCORE
+# OVERALL SCORE
 # ============================================================
 weights = np.ones(5) / 5
 crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_numpy(float)
 scored["overall"] = (crit @ weights).round(2)
 
 # ============================================================
-#                    TOP K
+# TOP-K
 # ============================================================
 st.subheader("Top Rankings")
 
@@ -251,7 +267,7 @@ st.write(f"""
 st.caption("Feedback: " + sel["feedback"])
 
 # ============================================================
-#                    ALL RESULTS
+# ALL RESULTS
 # ============================================================
 st.subheader("All Scored Results")
 
@@ -263,7 +279,7 @@ display_cols = [
 st.dataframe(top[display_cols], use_container_width=True)
 
 # ============================================================
-#                    DOWNLOAD
+# DOWNLOAD
 # ============================================================
 st.download_button(
     "⬇️ Download Top-K (CSV)",
