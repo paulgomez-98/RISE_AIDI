@@ -1,11 +1,10 @@
-# app.py — RISE Smart Scoring (Final, Clean, White Background + Logo)
-# - White background that keeps text readable
-# - Original Georgian logo loading preserved
+# app.py — RISE Smart Scoring (Final, Clean, White Theme + Logo)
+# - Full light UI theme override (header, sidebar, uploader, all)
+# - Georgian logo preserved exactly as original
+# - Feedback for ALL applicants
+# - Failed API calls shown
 # - No calibration
-# - AI scoring separated into a function
-# - All applicants get feedback
-# - Failed API calls shown clearly
-# - Uses EXACT two column names
+# - Single-file deployment for Streamlit Cloud
 
 import os, re, json, requests
 import numpy as np
@@ -14,42 +13,91 @@ import streamlit as st
 from pathlib import Path
 
 # ============================================================
-#                       WHITE BACKGROUND FIX
+#                     FULL LIGHT MODE OVERRIDE
 # ============================================================
-# This CSS forces ONLY background white but keeps text black
-white_bg_css = """
+light_theme_css = """
 <style>
-    .stApp {
-        background-color: #FFFFFF !important;
-    }
-    section[data-testid="stSidebar"] {
-        background-color: #FFFFFF !important;
-    }
-    .block-container {
-        background-color: #FFFFFF !important;
+
+    /* Make Streamlit header white */
+    header[data-testid="stHeader"] {
+        background-color: white !important;
     }
 
-    /* Keep text readable */
-    body, p, span, label, div, input, textarea {
+    header[data-testid="stHeader"]::before {
+        background: white !important;
+    }
+
+    /* Main app background */
+    .stApp {
+        background-color: #FFFFFF !important;
         color: #000000 !important;
     }
 
-    /* Input widgets */
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: #FFFFFF !important;
+    }
+
+    /* Global text color */
+    body, p, span, label, div, h1, h2, h3, h4, h5, h6 {
+        color: #000000 !important;
+    }
+
+    /* File uploader box */
+    div[data-testid="stFileUploaderDropzone"] {
+        background-color: #FFFFFF !important;
+        border: 2px dashed #005EA5 !important; /* Georgian blue */
+        color: #000000 !important;
+        border-radius: 10px;
+        padding: 20px;
+    }
+
+    /* File uploader icon */
+    div[data-testid="stFileUploaderDropzone"] svg {
+        fill: #005EA5 !important;
+    }
+
+    /* Inputs & textboxes */
     div[data-baseweb="input"] input,
     div[data-baseweb="textarea"] textarea {
         background-color: #FFFFFF !important;
         color: #000000 !important;
+        border: 1px solid #CCCCCC !important;
+        border-radius: 6px;
     }
 
+    /* Select dropdowns */
+    div[data-baseweb="select"] {
+        background-color: #FFFFFF !important;
+        color: #000000 !important;
+    }
+
+    /* Tables / DataFrames */
     .stDataFrame, .stTable {
         background-color: #FFFFFF !important;
+        color: #000000 !important;
     }
+
+    /* Buttons */
+    button[kind="primary"] {
+        background-color: #005EA5 !important; /* Georgian Blue */
+        color: white !important;
+        border-radius: 6px !important;
+    }
+
+    button[kind="secondary"] {
+        background-color: white !important;
+        color: #005EA5 !important;
+        border: 1px solid #005EA5 !important;
+        border-radius: 6px !important;
+    }
+
 </style>
 """
-st.markdown(white_bg_css, unsafe_allow_html=True)
+st.markdown(light_theme_css, unsafe_allow_html=True)
 
 # ============================================================
-#                       PAGE CONFIG
+#                     PAGE HEADER + LOGO
 # ============================================================
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
@@ -58,15 +106,13 @@ with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
     st.write("Upload → Score using LLaMA → View Top-K → View All → Download")
 
-# ============================================================
-#                       GEORGIAN LOGO LOADING
-# ============================================================
 with right:
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
     shown = False
+
     if logo_url:
         try:
-            st.image(logo_url, use_container_width=True); shown = True
+            st.image(logo_url, use_container_width=True); shown=True
         except:
             pass
 
@@ -78,34 +124,33 @@ with right:
             Path("georgian_logo.jpg")
         ]:
             if p.exists():
-                st.image(str(p), use_container_width=True); shown = True; break
+                st.image(str(p), use_container_width=True); shown=True; break
 
     if not shown:
         st.caption("")
 
 # ============================================================
-#                       CONSTANTS
+#                     CONSTANTS
 # ============================================================
 TARGET_TITLE = "What is the title of your research/capstone project?"
 TARGET_ABS   = "Please provide a description or abstract of your research."
 
-MODEL_NAME   = "llama-3.1-8b-instant"
-GROQ_URL     = "https://api.groq.com/openai/v1"
-TEMPERATURE  = 0.1
-MAX_TOKENS   = 256
+MODEL_NAME  = "llama-3.1-8b-instant"
+GROQ_URL    = "https://api.groq.com/openai/v1"
+TEMPERATURE = 0.1
+MAX_TOKENS  = 256
 
 def norm(s):
-    s = re.sub(r"\s+", " ", str(s)).strip().lower()
-    return s.replace("’", "'")
+    return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-#                       LLaMA SCORING FUNCTION
+#                     LLaMA SCORING FUNCTION
 # ============================================================
 def llama_score(title, abstract, api_key):
     prompt = f"""
 You are scoring a student research project.
 
-Return ONLY this JSON format:
+Return ONLY JSON:
 {{
   "originality": 1-5,
   "clarity": 1-5,
@@ -120,21 +165,20 @@ Abstract: {abstract}
 """
 
     try:
-        url = GROQ_URL + "/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": MODEL_NAME,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": TEMPERATURE,
-            "max_tokens": MAX_TOKENS,
-            "top_p": 0.9
-        }
+        res = requests.post(
+            GROQ_URL + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": TEMPERATURE,
+                "max_tokens": MAX_TOKENS,
+            },
+            timeout=60
+        )
 
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
-        r.raise_for_status()
-
-        content = r.json()["choices"][0]["message"]["content"]
-        content = re.sub(r"```json|```", "", content).strip()
+        res.raise_for_status()
+        content = re.sub(r"```json|```", "", res.json()["choices"][0]["message"]["content"]).strip()
         data = json.loads(content)
 
         return {
@@ -161,7 +205,7 @@ Abstract: {abstract}
         }
 
 # ============================================================
-#                       FILE UPLOAD
+#                     FILE UPLOAD
 # ============================================================
 file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
 if not file:
@@ -174,16 +218,13 @@ if df.empty:
     st.stop()
 
 # ============================================================
-#                       COLUMN VALIDATION
+#                     COLUMN VALIDATION
 # ============================================================
 normmap = {norm(c): c for c in df.columns}
 missing = []
 
-if norm(TARGET_TITLE) not in normmap:
-    missing.append(TARGET_TITLE)
-
-if norm(TARGET_ABS) not in normmap:
-    missing.append(TARGET_ABS)
+if norm(TARGET_TITLE) not in normmap: missing.append(TARGET_TITLE)
+if norm(TARGET_ABS) not in normmap: missing.append(TARGET_ABS)
 
 if missing:
     st.error("Missing required columns:\n" + "\n".join([f"• {m}" for m in missing]))
@@ -193,25 +234,24 @@ title_col = normmap[norm(TARGET_TITLE)]
 abs_col   = normmap[norm(TARGET_ABS)]
 
 work = df[[title_col, abs_col]].copy()
-work.columns = ["title", "abstract"]
+work.columns = ["title","abstract"]
 
-# clean
-work["title"] = work["title"].astype(str).strip()
-work["abstract"] = work["abstract"].astype(str).strip()
+work["title"] = work["title"].astype(str).str.strip()
+work["abstract"] = work["abstract"].astype(str).str.strip()
 work = work[work["title"].str.len() >= 3]
-work = work.drop_duplicates(subset=["title"], keep="first").reset_index()
+work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
 # ============================================================
-#                       API KEY
+#                     API KEY
 # ============================================================
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter GROQ API Key", type="password")
 if not api_key:
     st.stop()
 
 # ============================================================
-#                       SCORING LOOP
+#                     SCORING LOOP
 # ============================================================
-st.subheader("Scoring With LLaMA…")
+st.subheader("Scoring with LLaMA…")
 
 results = []
 prog = st.progress(0.0)
@@ -223,42 +263,37 @@ for i, row in work.iterrows():
 scored = pd.DataFrame(results)
 
 # ============================================================
-#                       SHOW FAILED API CALLS
+#                     FAILED API RESULTS
 # ============================================================
 failed = scored[scored["success"] == False]
 if not failed.empty:
     st.warning(f"{len(failed)} entries FAILED during scoring.")
-    st.dataframe(failed[["title", "feedback"]])
+    st.dataframe(failed[["title","feedback"]])
 
 # ============================================================
-#                       OVERALL SCORE
+#                     OVERALL SCORE (equal weights)
 # ============================================================
-weights = np.ones(5) / 5
+weights = np.ones(5)/5
 crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_numpy(float)
 scored["overall"] = (crit @ weights).round(2)
 
 # ============================================================
-#                       TOP-K
+#                     TOP-K SECTION
 # ============================================================
 st.subheader("Top Rankings")
 
-TOP_K = st.slider("Top-K", min_value=5, max_value=50, value=10, step=5)
-
+TOP_K = st.slider("Select Top-K", 5, 50, 10, 5)
 top = scored.sort_values("overall", ascending=False).reset_index(drop=True)
 
-st.dataframe(
-    top.head(TOP_K)[["title","overall","originality","clarity","rigor","impact","entrepreneurship"]],
-    use_container_width=True
-)
+st.dataframe(top.head(TOP_K)[["title","overall","originality","clarity","rigor","impact","entrepreneurship"]])
 
-pick = st.selectbox("View details:", top.head(TOP_K)["title"].tolist())
-
+pick = st.selectbox("View detailed result:", top.head(TOP_K)["title"].tolist())
 sel = top[top["title"] == pick].iloc[0]
 
 st.write(f"""
-**Title:** {sel['title']}
+### {sel['title']}
 
-**Overall:** {sel['overall']}
+**Overall Score:** {sel['overall']}
 
 - Originality: {sel['originality']}
 - Clarity: {sel['clarity']}
@@ -267,13 +302,12 @@ st.write(f"""
 - Entrepreneurship: {sel['entrepreneurship']}
 """)
 
-if sel["feedback"]:
-    st.caption("Feedback: " + sel["feedback"])
+st.caption("Feedback: " + sel["feedback"])
 
 # ============================================================
-#                       ALL RESULTS
+#                     ALL RESULTS
 # ============================================================
-st.subheader("All Results (Full Table)")
+st.subheader("All Scored Results")
 
 display_cols = [
     "title","originality","clarity","rigor",
@@ -283,7 +317,7 @@ display_cols = [
 st.dataframe(top[display_cols], use_container_width=True)
 
 # ============================================================
-#                       DOWNLOADS
+#                     DOWNLOAD BUTTONS
 # ============================================================
 st.download_button(
     "⬇️ Download Top-K (CSV)",
@@ -293,7 +327,7 @@ st.download_button(
 )
 
 st.download_button(
-    "⬇️ Download All Results (CSV)",
+    "⬇️ Download ALL Results (CSV)",
     top[display_cols].to_csv(index=False),
     file_name="rise_all_scored.csv",
     mime="text/csv"
