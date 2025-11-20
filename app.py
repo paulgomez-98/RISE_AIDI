@@ -1,9 +1,10 @@
-# app.py — RISE Smart Scoring (Default Theme + Stable API + EDA + Logo)
+# app.py — RISE Smart Scoring (Default Theme + Stable API + Basic EDA + Logo)
 # - Default Streamlit theme
 # - Georgian logo preserved
 # - Retry-safe API calls
-# - EDA + duplicate detection BEFORE scoring
-# - Positive, constructive feedback for all applicants
+# - Only basic EDA (no text stats)
+# - Duplicate detection BEFORE scoring
+# - Positive, constructive feedback
 # - No calibration
 # - Single-file deployment
 
@@ -24,7 +25,7 @@ st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 left, right = st.columns([5,1])
 with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
-    st.write("Upload → EDA → Score using LLaMA → Results → Download")
+    st.write("Upload → Check Duplicates → Score with LLaMA → Results → Download")
 
 with right:
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
@@ -64,11 +65,11 @@ def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-#          SAFE + RETRYING LLaMA CALL (Fixes API failures)
+#            SAFE LLaMA CALL WITH RETRY (API stabilization)
 # ============================================================
 def llama_score(title, abstract, api_key):
 
-    # POSITIVE + SUGGESTION FEEDBACK STYLE
+    # Positive feedback requirement
     prompt = f"""
 You are evaluating a student project. Provide scores and a helpful, encouraging comment.
 
@@ -79,7 +80,7 @@ Return ONLY this JSON:
   "rigor": 1-5,
   "impact": 1-5,
   "entrepreneurship": 1-5,
-  "feedback": "Start with a positive sentence. Give suggestions ONLY if necessary. Keep it short."
+  "feedback": "Start with a positive sentence. Give suggestions ONLY if needed. Keep it short and helpful."
 }}
 
 Title: {title}
@@ -96,7 +97,7 @@ Abstract: {abstract}
         "max_tokens": MAX_TOKENS,
     }
 
-    # Retry Mechanism
+    # Retry mechanism
     for attempt in range(5):
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -170,47 +171,32 @@ work.columns = ["title","abstract"]
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
 
-# Limit abstract length for API safety
+# Truncate abstract for API safety
 work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
 
 # ============================================================
-#                    EDA BEFORE SCORING
+#                BASIC EDA (NO TEXT ANALYSIS)
 # ============================================================
-st.subheader("📊 Exploratory Data Analysis (Before Scoring)")
+st.subheader("📊 File Summary (Before Scoring)")
 
 total_rows = len(work)
 unique_titles = work["title"].nunique()
 
-# Duplicates
+st.markdown(f"""
+**Total rows:** {total_rows}  
+**Unique titles:** {unique_titles}  
+""")
+
+# Detect duplicates ONLY
 norm_titles = work["title"].str.lower().str.replace(r"\s+"," ", regex=True)
 duplicate_mask = norm_titles.duplicated(keep=False)
 dupes = work[duplicate_mask]
 
-missing_abs = (work["abstract"].str.len() == 0).sum()
-
-title_len = work["title"].str.len()
-abs_len = work["abstract"].str.len()
-
-st.markdown(f"""
-**Total rows:** {total_rows}  
-**Unique project titles:** {unique_titles}  
-**Duplicate titles:** {len(dupes)}  
-**Missing abstracts:** {missing_abs}  
-""")
-
-# Show duplicates if any
 if len(dupes) > 0:
-    st.warning("💡 Duplicate project titles found:")
+    st.warning(f"⚠️ Duplicate project titles detected ({len(dupes)} entries):")
     st.dataframe(dupes, use_container_width=True)
-
-# EDA Stats
-st.markdown("### 🔎 Text statistics")
-st.write(pd.DataFrame({
-    "Metric": ["Title length (chars)", "Abstract length (chars)"],
-    "Min": [title_len.min(), abs_len.min()],
-    "Mean": [title_len.mean(), abs_len.mean()],
-    "Max": [title_len.max(), abs_len.max()]
-}))
+else:
+    st.success("No duplicate project titles found.")
 
 # ============================================================
 #                    API KEY INPUT
@@ -220,7 +206,7 @@ if not api_key:
     st.stop()
 
 # ============================================================
-#                    SCORING LOOP
+#                    SCORING SECTION
 # ============================================================
 st.subheader("🔄 Scoring with LLaMA…")
 
@@ -232,7 +218,7 @@ for i, row in work.iterrows():
     results.append(llama_score(row["title"], row["abstract"], api_key))
 
     # Throttle to avoid Groq rate limits
-    time.sleep(0.3 + random.random()/4)
+    time.sleep(0.25 + random.random()/4)
 
     prog.progress((i+1)/len(work))
 
@@ -247,14 +233,14 @@ if not failed.empty:
     st.dataframe(failed[["title","feedback"]])
 
 # ============================================================
-#                    OVERALL SCORE
+#                    OVERALL SCORE (Equal weights)
 # ============================================================
 weights = np.ones(5) / 5
 crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_numpy(float)
 scored["overall"] = (crit @ weights).round(2)
 
 # ============================================================
-#                    TOP-K
+#                    TOP-K RESULTS
 # ============================================================
 st.subheader("🏆 Top Rankings")
 
@@ -265,7 +251,7 @@ st.dataframe(top.head(TOP_K)[[
     "title","overall","originality","clarity","rigor","impact","entrepreneurship"
 ]])
 
-pick = st.selectbox("View details:", top.head(TOP_K)["title"].tolist())
+pick = st.selectbox("View details of:", top.head(TOP_K)["title"].tolist())
 sel = top[top["title"] == pick].iloc[0]
 
 st.write(f"""
@@ -283,7 +269,7 @@ st.write(f"""
 st.caption("Feedback: " + sel["feedback"])
 
 # ============================================================
-#                    ALL RESULTS
+#                    ALL RESULTS TABLE
 # ============================================================
 st.subheader("📄 All Scored Results")
 
