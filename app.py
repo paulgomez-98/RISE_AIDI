@@ -1,9 +1,9 @@
-# app.py — RISE Smart Scoring (Clean Single File Version)
-# - UI and AI logic separated into functions (but same file)
-# - NO calibration section
-# - Failed API calls displayed clearly
-# - Feedback for ALL applicants
-# - Uses EXACT required headers
+# app.py — RISE Smart Scoring (Single File, Clean, No Calibration)
+# - White background theme
+# - UI separated from scoring logic internally
+# - Shows failed API calls clearly
+# - Feedback for ALL rows
+# - Uses EXACT two required CSV headers
 
 import os, re, json, requests
 import numpy as np
@@ -12,12 +12,27 @@ import streamlit as st
 from pathlib import Path
 
 # ============================================================
-#                    STREAMLIT PAGE SETTINGS
+#                    FORCE WHITE BACKGROUND
+# ============================================================
+white_bg_css = """
+<style>
+    .stApp { background-color: white !important; }
+    section[data-testid="stSidebar"] { background-color: white !important; }
+    .st-emotion-cache-1jicfl2 { background-color: white !important; }
+    div.block-container { background-color: white !important; }
+    .stDataFrame, .stTable { background-color: white !important; }
+    .stTextInput, .stFileUploader, .stSelectbox { background-color: white !important; }
+</style>
+"""
+st.markdown(white_bg_css, unsafe_allow_html=True)
+
+# ============================================================
+#                    PAGE CONFIG
 # ============================================================
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
 st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
-st.write("Upload CSV/XLSX → Score with LLaMA → View Top-K → View All → Download")
+st.write("Upload → Score with LLaMA → Show Top-K → Show All → Download")
 
 # ============================================================
 #                    CONSTANTS
@@ -31,7 +46,7 @@ TEMPERATURE   = 0.1
 MAX_TOKENS    = 256
 
 # ============================================================
-#                    NORMALIZATION FUNCTION
+#                    NORMALIZATION
 # ============================================================
 def norm(s: str) -> str:
     s = re.sub(r"\s+", " ", str(s)).strip().lower()
@@ -45,14 +60,8 @@ def llama_score(title: str, abstract: str, api_key: str):
     """
     Returns dict:
     {
-      "success": bool,
-      "title": ...,
-      "originality": float,
-      "clarity": float,
-      "rigor": float,
-      "impact": float,
-      "entrepreneurship": float,
-      "feedback": str
+      success, title, originality, clarity, rigor,
+      impact, entrepreneurship, feedback
     }
     """
 
@@ -138,8 +147,11 @@ if df.empty:
 normmap = {norm(c): c for c in df.columns}
 missing = []
 
-if norm(TARGET_TITLE) not in normmap:  missing.append(TARGET_TITLE)
-if norm(TARGET_ABS) not in normmap:    missing.append(TARGET_ABS)
+if norm(TARGET_TITLE) not in normmap:
+    missing.append(TARGET_TITLE)
+
+if norm(TARGET_ABS) not in normmap:
+    missing.append(TARGET_ABS)
 
 if missing:
     st.error("Missing required column(s):\n" + "\n".join([f"• {m}" for m in missing]))
@@ -151,15 +163,15 @@ abs_col   = normmap[norm(TARGET_ABS)]
 work = df[[title_col, abs_col]].copy()
 work.columns = ["title","abstract"]
 
-# Clean data
+# Clean titles + abstracts
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
 work = work[work["title"].str.len() >= 3]
 
-# Remove yes/no style junk titles
+# Remove junk boolean titles
 work = work[~work["title"].str.lower().isin({"yes","no","true","false"})]
 
-# Remove duplicates
+# Remove duplicate titles
 work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
 # ============================================================
@@ -172,45 +184,45 @@ if not api_key:
 # ============================================================
 #                    SCORING LOOP
 # ============================================================
-st.subheader("Scoring With LLaMA…")
+st.subheader("Scoring with LLaMA…")
 results = []
 prog = st.progress(0.0)
 
 for i, row in work.iterrows():
     result = llama_score(row["title"], row["abstract"], api_key)
     results.append(result)
-    prog.progress((i+1)/len(work))
+    prog.progress((i + 1) / len(work))
 
 scored = pd.DataFrame(results)
 
 # ============================================================
-#                    DISPLAY FAILED ENTRIES
+#                    DISPLAY FAILED RESULTS
 # ============================================================
 failed = scored[scored["success"] == False]
 if not failed.empty:
-    st.warning(f"{len(failed)} entries FAILED to score.")
+    st.warning(f"{len(failed)} entries FAILED during scoring.")
     st.dataframe(failed[["title","feedback"]])
 
 # ============================================================
-#                    OVERALL SCORE (equal weights)
+#                    OVERALL SCORE
 # ============================================================
 weights = np.ones(5) / 5
 crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_numpy(float)
 scored["overall"] = (crit @ weights).round(2)
 
 # ============================================================
-#                    TOP-K DISPLAY
+#                    TOP-K
 # ============================================================
 st.subheader("Top Rankings")
 
-TOP_K = st.slider("Top-K", min_value=5, max_value=50, value=10, step=5)
+TOP_K = st.slider("Top-K", 5, 50, 10, 5)
 
 top = scored.sort_values("overall", ascending=False).reset_index(drop=True)
 
 st.write(f"**Top {TOP_K} Projects:**")
 st.dataframe(top.head(TOP_K)[["title","overall","originality","clarity","rigor","impact","entrepreneurship"]])
 
-selected = st.selectbox("View detailed score:", top.head(TOP_K)["title"].tolist())
+selected = st.selectbox("View detailed score for:", top.head(TOP_K)["title"].tolist())
 
 sel = top[top["title"] == selected].iloc[0]
 st.write(
@@ -231,10 +243,10 @@ if str(sel["feedback"]).strip():
 # ============================================================
 st.subheader("All Results (With Feedback)")
 display_cols = ["title","originality","clarity","rigor","impact","entrepreneurship","overall","feedback"]
-st.dataframe(top[display_cols])
+st.dataframe(top[display_cols], use_container_width=True)
 
 # ============================================================
-#                    DOWNLOADS
+#                    DOWNLOAD
 # ============================================================
 st.download_button(
     "⬇️ Download Top-K (CSV)",
