@@ -1,16 +1,6 @@
 # ============================================================
 # app.py — RISE Smart Scoring (Batched + Parallel + Fast + Stable)
 # ============================================================
-# - Default Streamlit theme
-# - Georgian logo preserved
-# - Batch scoring (5 per request)
-# - Parallel execution (10 threads)
-# - Retry-safe API calls
-# - Basic EDA (duplicates only)
-# - Detailed paragraph feedback
-# - No calibration
-# - Single-file deployment
-# ============================================================
 
 import os, re, json, requests, time, random
 import numpy as np
@@ -64,7 +54,7 @@ TARGET_ABS   = "Please provide a description or abstract of your research."
 MODEL_NAME  = "llama-3.1-8b-instant"
 GROQ_URL    = "https://api.groq.com/openai/v1"
 TEMPERATURE = 0.1
-MAX_TOKENS  = 512   # Increased for batch feedback
+MAX_TOKENS  = 300   # reduced because feedback is short
 BATCH_SIZE  = 5
 MAX_THREADS = 10
 
@@ -72,7 +62,7 @@ def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-# BATCHED PROMPT BUILDER
+# BATCH PROMPT (SHORT FEEDBACK)
 # ============================================================
 def build_batch_prompt(batch):
     items = []
@@ -82,19 +72,17 @@ def build_batch_prompt(batch):
             "abstract": entry["abstract"]
         })
 
-    # JSON list with title included — as requested
     return f"""
-You are evaluating a batch of student research projects. 
-For EACH project, return ONE detailed JSON object inside a JSON LIST.
+You are evaluating student research projects.  
+For EACH project, return one JSON object inside a JSON LIST.
 
-Rules for feedback:
-- Begin with a positive, encouraging sentence
-- Provide 2–3 sentences of guidance
-- Suggestions ONLY if needed
-- Keep tone supportive and helpful
-- DO NOT add extra text outside the JSON list
+FEEDBACK RULES:
+- Begin with a positive supportive sentence.
+- Add **ONE** short suggestion ONLY if needed.
+- Total feedback length MUST be **max 2 sentences**.
+- DO NOT add text outside the JSON list.
 
-Return ONLY a JSON list like this:
+Return EXACTLY this format:
 [
   {{
     "title": "...",
@@ -103,17 +91,17 @@ Return ONLY a JSON list like this:
     "rigor": 1-5,
     "impact": 1-5,
     "entrepreneurship": 1-5,
-    "feedback": "3–5 sentence constructive paragraph"
+    "feedback": "2-sentence constructive feedback"
   }},
   ...
 ]
 
-Projects to score:
+Projects:
 {json.dumps(items, indent=2)}
 """
 
 # ============================================================
-# SAFE API CALL (BATCHED)
+# SAFE BATCH CALL
 # ============================================================
 def llama_score_batch(batch, api_key):
 
@@ -140,7 +128,6 @@ def llama_score_batch(batch, api_key):
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"]
             cleaned = re.sub(r"```json|```", "", raw).strip()
-
             data_list = json.loads(cleaned)
 
             results = []
@@ -161,7 +148,6 @@ def llama_score_batch(batch, api_key):
         except Exception:
             time.sleep(2 ** attempt + random.random())
 
-    # On failure, return fallback entries for each in batch
     return [{
         "success": False,
         "title": x["title"],
@@ -204,10 +190,9 @@ abs_col   = normmap[norm(TARGET_ABS)]
 work = df[[title_col, abs_col]].copy()
 work.columns = ["title","abstract"]
 
-# Clean
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
-work["abstract"] = work["abstract"].apply(lambda x: x[:1500])  # Safety
+work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
 
 # ============================================================
 # BASIC EDA
@@ -228,7 +213,6 @@ if len(dupes) > 0:
 else:
     st.success("No duplicate project titles found.")
 
-# Remove duplicates for scoring
 work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
 # ============================================================
@@ -239,7 +223,7 @@ if not api_key:
     st.stop()
 
 # ============================================================
-# BATCHING + PARALLEL SCORING
+# PARALLEL SCORING
 # ============================================================
 st.subheader("🔄 Scoring with LLaMA (Fast Mode)…")
 
