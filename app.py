@@ -1,12 +1,14 @@
-# app.py — RISE Smart Scoring (Default Theme + Logo Restored)
-# - Theme is now default (NO background override)
+# app.py — RISE Smart Scoring (Default Theme + Stable API + Logo)
+# - Default Streamlit theme (no overrides)
 # - Georgian logo preserved
-# - Feedback for all applicants
+# - Retry-safe API calls (fixes failing after few requests)
+# - Gentle throttling to avoid Groq rate limits
+# - Feedback for ALL applicants
 # - Failed API results shown
 # - No calibration
 # - Single-file deployment
 
-import os, re, json, requests
+import os, re, json, requests, time, random
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -63,7 +65,7 @@ def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-#                    AI MODEL CALL
+#        SAFE + RETRYING LLaMA CALL (FIXES API FAILURES)
 # ============================================================
 def llama_score(title, abstract, api_key):
     prompt = f"""
@@ -83,45 +85,60 @@ Title: {title}
 Abstract: {abstract}
 """
 
-    try:
-        res = requests.post(
-            GROQ_URL + "/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": TEMPERATURE,
-                "max_tokens": MAX_TOKENS,
-            },
-            timeout=60
-        )
+    url = GROQ_URL + "/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": TEMPERATURE,
+        "max_tokens": MAX_TOKENS,
+    }
 
-        res.raise_for_status()
-        content = re.sub(r"```json|```", "", res.json()["choices"][0]["message"]["content"]).strip()
-        data = json.loads(content)
+    # Retry loop — exponential backoff
+    for attempt in range(5):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
 
-        return {
-            "success": True,
-            "title": title,
-            "originality": float(data.get("originality", 3)),
-            "clarity": float(data.get("clarity", 3)),
-            "rigor": float(data.get("rigor", 3)),
-            "impact": float(data.get("impact", 3)),
-            "entrepreneurship": float(data.get("entrepreneurship", 3)),
-            "feedback": data.get("feedback", "").strip()
-        }
+            # Rate limit handling
+            if r.status_code == 429:
+                time.sleep(2 ** attempt + random.random())
+                continue
 
-    except:
-        return {
-            "success": False,
-            "title": title,
-            "originality": 0,
-            "clarity": 0,
-            "rigor": 0,
-            "impact": 0,
-            "entrepreneurship": 0,
-            "feedback": "API ERROR — scoring failed."
-        }
+            r.raise_for_status()
+            raw = r.json()["choices"][0]["message"]["content"]
+            cleaned = re.sub(r"```json|```", "", raw).strip()
+
+            try:
+                data = json.loads(cleaned)
+            except:
+                # Model returned malformed JSON
+                raise ValueError("Bad JSON")
+
+            return {
+                "success": True,
+                "title": title,
+                "originality": float(data.get("originality", 3)),
+                "clarity": float(data.get("clarity", 3)),
+                "rigor": float(data.get("rigor", 3)),
+                "impact": float(data.get("impact", 3)),
+                "entrepreneurship": float(data.get("entrepreneurship", 3)),
+                "feedback": data.get("feedback","").strip()
+            }
+
+        except Exception:
+            time.sleep(2 ** attempt + random.random())
+
+    # After all retries fail
+    return {
+        "success": False,
+        "title": title,
+        "originality": 0,
+        "clarity": 0,
+        "rigor": 0,
+        "impact": 0,
+        "entrepreneurship": 0,
+        "feedback": "API ERROR — scoring failed after retries."
+    }
 
 # ============================================================
 #                    FILE UPLOAD
@@ -131,7 +148,6 @@ if not file:
     st.stop()
 
 df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-
 if df.empty:
     st.error("The uploaded file is empty.")
     st.stop()
@@ -146,7 +162,7 @@ if norm(TARGET_TITLE) not in normmap: missing.append(TARGET_TITLE)
 if norm(TARGET_ABS) not in normmap:   missing.append(TARGET_ABS)
 
 if missing:
-    st.error("Missing required columns:\n" + "\n".join([f"• {m}" for m in missing]))
+    st.error("Missing required columns:\n" + "\n".join(f"• {m}" for m in missing))
     st.stop()
 
 title_col = normmap[norm(TARGET_TITLE)]
@@ -157,6 +173,10 @@ work.columns = ["title","abstract"]
 
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
+
+# very long abstracts cause token overload → truncate safely
+work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
+
 work = work[work["title"].str.len() >= 3]
 work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
@@ -168,7 +188,7 @@ if not api_key:
     st.stop()
 
 # ============================================================
-#                    SCORING LOOP
+#                    SCORING LOOP  (WITH THROTTLING)
 # ============================================================
 st.subheader("Scoring with LLaMA…")
 
@@ -177,6 +197,10 @@ prog = st.progress(0.0)
 
 for i, row in work.iterrows():
     results.append(llama_score(row["title"], row["abstract"], api_key))
+
+    # Throttle slightly to avoid rate limits
+    time.sleep(0.3 + random.random()/5)
+
     prog.progress((i+1)/len(work))
 
 scored = pd.DataFrame(results)
@@ -210,8 +234,8 @@ st.dataframe(
 )
 
 pick = st.selectbox("View detailed result:", top.head(TOP_K)["title"].tolist())
-
 sel = top[top["title"] == pick].iloc[0]
+
 st.write(f"""
 ### {sel['title']}
 
@@ -239,7 +263,7 @@ display_cols = [
 st.dataframe(top[display_cols], use_container_width=True)
 
 # ============================================================
-#                    DOWNLOAD BUTTONS
+#                    DOWNLOAD
 # ============================================================
 st.download_button(
     "⬇️ Download Top-K (CSV)",
