@@ -1,9 +1,11 @@
-# ============================================
-# RISE — Smart Scoring & Feedback (FAST Batch Version)
-# Batch size = 10 (≈ 20–35 sec for 200 rows)
-# Stable JSON parsing + retries
-# EDA + logo + clean UI
-# ============================================
+# app.py — RISE Smart Scoring (ULTRA FAST MODE for Groq Free Tier)
+# - Default Streamlit theme
+# - Georgian logo
+# - EDA + duplicate detection
+# - No batch mode (Groq free tier doesn't allow it)
+# - Minimal delay (max speed)
+# - Only 1 retry attempt
+# - Reduced token usage
 
 import os, re, json, requests, time, random
 import numpy as np
@@ -11,25 +13,29 @@ import pandas as pd
 import streamlit as st
 from pathlib import Path
 
-# --------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------
+
+# ============================================================
+#                    PAGE CONFIG
+# ============================================================
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
-# --------------------------------------------
-# HEADER + LOGO
-# --------------------------------------------
+
+# ============================================================
+#                    HEADER + LOGO
+# ============================================================
 left, right = st.columns([5,1])
 with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
-    st.write("Upload → EDA → Batch Score using LLaMA → Top-K → Download")
+    st.write("Upload → EDA → Score using LLaMA → View Top-K → Download")
 
 with right:
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
     shown = False
+
     if logo_url:
         try:
-            st.image(logo_url, use_container_width=True); shown=True
+            st.image(logo_url, use_container_width=True)
+            shown = True
         except:
             pass
 
@@ -41,121 +47,120 @@ with right:
             Path("georgian_logo.jpg")
         ]:
             if p.exists():
-                st.image(str(p), use_container_width=True); shown=True; break
+                st.image(str(p), use_container_width=True)
+                shown = True
+                break
 
     if not shown:
         st.caption("")
 
-# --------------------------------------------
-# CONSTANTS
-# --------------------------------------------
+
+# ============================================================
+#                    CONSTANTS
+# ============================================================
 TARGET_TITLE = "What is the title of your research/capstone project?"
 TARGET_ABS   = "Please provide a description or abstract of your research."
 
 MODEL_NAME  = "llama-3.1-8b-instant"
 GROQ_URL    = "https://api.groq.com/openai/v1"
-BATCH_SIZE  = 10
-MAX_TOKENS  = 512
+TEMPERATURE = 0.1
+MAX_TOKENS  = 120     # reduced for speed
+
 
 def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
-# --------------------------------------------
-# BATCH LLaMA CALL
-# --------------------------------------------
-def score_batch(batch, api_key):
-    """
-    batch = list of dicts:
-    [{'title': ..., 'abstract': ...}, ...]
-    """
 
-    # Build JSON array for model to score
-    items_json = json.dumps(batch, ensure_ascii=False)
-
+# ============================================================
+#                    FAST LLaMA CALL
+# ============================================================
+def llama_score_fast(title, abstract, api_key):
     prompt = f"""
-You are evaluating several student research projects.
+Score this project from 1–5 on:
+originality, clarity, rigor, impact, entrepreneurship.
 
-Return ONLY valid JSON list.
-For EACH item, return an object with this exact structure:
+Return ONLY JSON:
+{{
+  "originality": number,
+  "clarity": number,
+  "rigor": number,
+  "impact": number,
+  "entrepreneurship": number,
+  "feedback": "one short positive sentence"
+}}
 
-[
-  {{
-    "title": "...",
-    "originality": 1-5,
-    "clarity": 1-5,
-    "rigor": 1-5,
-    "impact": 1-5,
-    "entrepreneurship": 1-5,
-    "feedback": "Start with a positive sentence. Add a short suggestion only if needed."
-  }}
-]
-
-Now evaluate these items:
-{items_json}
+Title: {title}
+Abstract: {abstract}
 """
 
     url = GROQ_URL + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
     payload = {
         "model": MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": MAX_TOKENS
+        "temperature": TEMPERATURE,
+        "max_tokens": MAX_TOKENS,
     }
 
-    for attempt in range(4):
+    # only 1 retry (FAST MODE)
+    for attempt in range(2):
         try:
-            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            r = requests.post(url, headers=headers, json=payload, timeout=30)
 
+            # Rate limit → retry once
             if r.status_code == 429:
-                time.sleep(1.5 + random.random())
+                time.sleep(0.2)
                 continue
 
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"]
             cleaned = re.sub(r"```json|```", "", raw).strip()
 
-            try:
-                data = json.loads(cleaned)
-                return data
-            except:
-                # JSON malformed → retry
-                time.sleep(1 + random.random())
+            data = json.loads(cleaned)
 
-        except:
-            time.sleep(1 + random.random())
+            return {
+                "success": True,
+                "title": title,
+                "originality": float(data.get("originality", 3)),
+                "clarity": float(data.get("clarity", 3)),
+                "rigor": float(data.get("rigor", 3)),
+                "impact": float(data.get("impact", 3)),
+                "entrepreneurship": float(data.get("entrepreneurship", 3)),
+                "feedback": data.get("feedback","").strip()
+            }
 
-    # If everything fails → return fallback empty results
-    fallback = []
-    for item in batch:
-        fallback.append({
-            "title": item["title"],
-            "originality": 0,
-            "clarity": 0,
-            "rigor": 0,
-            "impact": 0,
-            "entrepreneurship": 0,
-            "feedback": "API ERROR — batch scoring failed after retries."
-        })
-    return fallback
+        except Exception:
+            time.sleep(0.1)
 
-# --------------------------------------------
-# FILE UPLOAD
-# --------------------------------------------
+    # if failed
+    return {
+        "success": False,
+        "title": title,
+        "originality": 0,
+        "clarity": 0,
+        "rigor": 0,
+        "impact": 0,
+        "entrepreneurship": 0,
+        "feedback": "API ERROR — scoring failed."
+    }
+
+
+# ============================================================
+#                    FILE UPLOAD
+# ============================================================
 file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
 if not file:
     st.stop()
 
 df = pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-
 if df.empty:
-    st.error("The uploaded file is empty.")
+    st.error("Uploaded file is empty.")
     st.stop()
 
-# --------------------------------------------
-# COLUMN VALIDATION
-# --------------------------------------------
+
+# ============================================================
+#                    COLUMN VALIDATION
+# ============================================================
 normmap = {norm(c): c for c in df.columns}
 missing = []
 
@@ -170,86 +175,92 @@ title_col = normmap[norm(TARGET_TITLE)]
 abs_col   = normmap[norm(TARGET_ABS)]
 
 work = df[[title_col, abs_col]].copy()
-work.columns = ["title","abstract"]
+work.columns = ["title", "abstract"]
 
-# Clean
 work["title"] = work["title"].astype(str).str.strip()
 work["abstract"] = work["abstract"].astype(str).str.strip()
+
+# truncate abstract for safety
 work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
 
-# --------------------------------------------
-# EDA — Duplicates
-# --------------------------------------------
+# remove junk/short titles
+work = work[work["title"].str.len() >= 3]
+
+
+# ============================================================
+#                    EDA — DUPLICATE CHECK
+# ============================================================
 st.subheader("📊 EDA — File Summary")
 
 total_rows = len(work)
 unique_titles = work["title"].nunique()
-duplicate_entries = total_rows - unique_titles
+duplicate_count = total_rows - unique_titles
 
-st.markdown(f"""
-**Total rows:** {total_rows}  
-**Unique titles:** {unique_titles}  
-**Duplicate title entries:** {duplicate_entries}  
-""")
+st.write(f"**Total rows:** {total_rows}")
+st.write(f"**Unique titles:** {unique_titles}")
+st.write(f"**Duplicate title entries:** {duplicate_count}")
 
-dupe_mask = work["title"].str.lower().duplicated(keep=False)
-dupes = work[dupe_mask]
+norm_titles = work["title"].str.lower().str.replace(r"\s+"," ", regex=True)
+dupes = work[norm_titles.duplicated(keep=False)]
 
 if len(dupes) > 0:
-    st.warning(f"{duplicate_entries} duplicates found. Showing duplicate rows below:")
+    st.warning(f"⚠️ {len(dupes)} duplicates found. Showing duplicate rows:")
     st.dataframe(dupes, use_container_width=True)
 else:
     st.success("No duplicate titles found.")
 
-# Remove duplicates before scoring
+# keep only unique for scoring
 work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
-# --------------------------------------------
-# API KEY
-# --------------------------------------------
-api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter GROQ API Key", type="password")
+
+# ============================================================
+#                    API KEY
+# ============================================================
+api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter GROQ API key", type="password")
 if not api_key:
     st.stop()
 
-# --------------------------------------------
-# BATCH SCORING
-# --------------------------------------------
-st.subheader("⚡ Scoring with LLaMA (Batch Mode)…")
+
+# ============================================================
+#                    SCORING LOOP (FAST MODE)
+# ============================================================
+st.subheader("⚡ Scoring with LLaMA (Fast Mode)…")
 
 results = []
 prog = st.progress(0.0)
 
-total_batches = (len(work) + BATCH_SIZE - 1) // BATCH_SIZE
+for i, row in work.iterrows():
 
-for batch_idx in range(total_batches):
-    batch_df = work.iloc[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
+    results.append(llama_score_fast(row["title"], row["abstract"], api_key))
 
-    batch_items = batch_df.to_dict("records")
-    scored_batch = score_batch(batch_items, api_key)
+    # **FAST MODE delay**
+    time.sleep(0.05)
 
-    results.extend(scored_batch)
-    prog.progress((batch_idx + 1) / total_batches)
+    prog.progress((i+1)/len(work))
 
 scored = pd.DataFrame(results)
 
-# --------------------------------------------
-# FAILURE REPORT
-# --------------------------------------------
-failed = scored[(scored["originality"] == 0) & (scored["clarity"] == 0)]
+
+# ============================================================
+#                    API FAILURES
+# ============================================================
+failed = scored[scored["success"] == False]
 if not failed.empty:
     st.warning(f"{len(failed)} entries FAILED during scoring.")
     st.dataframe(failed[["title","feedback"]])
 
-# --------------------------------------------
-# OVERALL SCORE
-# --------------------------------------------
+
+# ============================================================
+#                    OVERALL SCORE
+# ============================================================
 weights = np.ones(5) / 5
 crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_numpy(float)
 scored["overall"] = (crit @ weights).round(2)
 
-# --------------------------------------------
-# TOP-K RESULTS
-# --------------------------------------------
+
+# ============================================================
+#                    TOP K
+# ============================================================
 st.subheader("🏆 Top Rankings")
 
 TOP_K = st.slider("Select Top-K", 5, 50, 10, 5)
@@ -260,7 +271,7 @@ st.dataframe(
     use_container_width=True
 )
 
-pick = st.selectbox("View details of:", top.head(TOP_K)["title"].tolist())
+pick = st.selectbox("View details:", top.head(TOP_K)["title"].tolist())
 sel = top[top["title"] == pick].iloc[0]
 
 st.write(f"""
@@ -277,11 +288,11 @@ st.write(f"""
 
 st.caption("Feedback: " + sel["feedback"])
 
-# --------------------------------------------
-# ALL RESULTS
-# --------------------------------------------
-st.subheader("📄 All Scored Results")
 
+# ============================================================
+#                    ALL RESULTS
+# ============================================================
+st.subheader("📄 All Scored Results")
 display_cols = [
     "title","originality","clarity","rigor",
     "impact","entrepreneurship","overall","feedback"
@@ -289,9 +300,10 @@ display_cols = [
 
 st.dataframe(top[display_cols], use_container_width=True)
 
-# --------------------------------------------
-# DOWNLOAD BUTTONS
-# --------------------------------------------
+
+# ============================================================
+#                    DOWNLOAD
+# ============================================================
 st.download_button(
     "⬇️ Download Top-K (CSV)",
     top.head(TOP_K)[display_cols].to_csv(index=False),
