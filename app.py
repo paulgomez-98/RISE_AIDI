@@ -177,7 +177,11 @@ work["abstract"] = work["abstract"].astype(str).str.strip()
 # very long abstracts cause token overload → truncate safely
 work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
 
-work = work[work["title"].str.len() >= 3]
+# Count duplicates BEFORE dropping
+duplicate_count = work.duplicated(subset=["title"]).sum()
+unique_count = len(work) - duplicate_count
+
+# Remove duplicates
 work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
 
 # ============================================================
@@ -253,14 +257,14 @@ st.caption("Feedback: " + sel["feedback"])
 # ============================================================
 #                    ALL RESULTS
 # ============================================================
-st.subheader("All Scored Results")
+# ============================================================
+#                    SUMMARY OF DUPLICATES
+# ============================================================
+st.subheader("Data Summary")
 
-display_cols = [
-    "title","originality","clarity","rigor",
-    "impact","entrepreneurship","overall","feedback"
-]
-
-st.dataframe(top[display_cols], use_container_width=True)
+col1, col2 = st.columns(2)
+col1.metric("Duplicate Titles Removed", duplicate_count)
+col2.metric("Unique Titles Scored", unique_count)
 
 # ============================================================
 #                    DOWNLOAD
@@ -278,3 +282,4 @@ st.download_button(
     file_name="rise_all_scored.csv",
     mime="text/csv"
 )
+
