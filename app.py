@@ -1,12 +1,4 @@
-# app.py — RISE Smart Scoring (Default Theme + Stable API + Logo)
-# - Default Streamlit theme (no overrides)
-# - Georgian logo preserved
-# - Retry-safe API calls (fixes failing after few requests)
-# - Gentle throttling to avoid Groq rate limits
-# - Feedback for ALL applicants
-# - Failed API results shown
-# - No calibration
-# - Single-file deployment
+# app.py — RISE Smart Scoring (Clean + Duplicate Handling + Stable API)
 
 import os, re, json, requests, time, random
 import numpy as np
@@ -33,7 +25,8 @@ with right:
 
     if logo_url:
         try:
-            st.image(logo_url, use_container_width=True); shown=True
+            st.image(logo_url, use_container_width=True)
+            shown = True
         except:
             pass
 
@@ -45,10 +38,9 @@ with right:
             Path("georgian_logo.jpg")
         ]:
             if p.exists():
-                st.image(str(p), use_container_width=True); shown=True; break
-
-    if not shown:
-        st.caption("")
+                st.image(str(p), use_container_width=True)
+                shown = True
+                break
 
 # ============================================================
 #                    CONSTANTS
@@ -65,7 +57,7 @@ def norm(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower().replace("’","'")
 
 # ============================================================
-#        SAFE + RETRYING LLaMA CALL (FIXES API FAILURES)
+#          SAFE + RETRYING LLaMA CALL
 # ============================================================
 def llama_score(title, abstract, api_key):
     prompt = f"""
@@ -94,25 +86,18 @@ Abstract: {abstract}
         "max_tokens": MAX_TOKENS,
     }
 
-    # Retry loop — exponential backoff
     for attempt in range(5):
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=60)
-
-            # Rate limit handling
             if r.status_code == 429:
-                time.sleep(2 ** attempt + random.random())
+                time.sleep(2 ** attempt)
                 continue
 
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"]
             cleaned = re.sub(r"```json|```", "", raw).strip()
 
-            try:
-                data = json.loads(cleaned)
-            except:
-                # Model returned malformed JSON
-                raise ValueError("Bad JSON")
+            data = json.loads(cleaned)
 
             return {
                 "success": True,
@@ -125,10 +110,9 @@ Abstract: {abstract}
                 "feedback": data.get("feedback","").strip()
             }
 
-        except Exception:
+        except:
             time.sleep(2 ** attempt + random.random())
 
-    # After all retries fail
     return {
         "success": False,
         "title": title,
@@ -137,13 +121,13 @@ Abstract: {abstract}
         "rigor": 0,
         "impact": 0,
         "entrepreneurship": 0,
-        "feedback": "API ERROR — scoring failed after retries."
+        "feedback": "API ERROR — scoring failed."
     }
 
 # ============================================================
 #                    FILE UPLOAD
 # ============================================================
-file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
+file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 if not file:
     st.stop()
 
@@ -169,31 +153,40 @@ title_col = normmap[norm(TARGET_TITLE)]
 abs_col   = normmap[norm(TARGET_ABS)]
 
 work = df[[title_col, abs_col]].copy()
-work.columns = ["title","abstract"]
+work.columns = ["title", "abstract"]
 
 work["title"] = work["title"].astype(str).str.strip()
-work["abstract"] = work["abstract"].astype(str).str.strip()
-
-# very long abstracts cause token overload → truncate safely
-work["abstract"] = work["abstract"].apply(lambda x: x[:1500])
-
-# Count duplicates BEFORE dropping
-duplicate_count = work.duplicated(subset=["title"]).sum()
-unique_count = len(work) - duplicate_count
-
-# Remove duplicates
-work = work.drop_duplicates(subset=["title"], keep="first").reset_index(drop=True)
-
+work["abstract"] = work["abstract"].astype(str).str.strip().apply(lambda x: x[:1500])
 
 # ============================================================
-#                    API KEY INPUT
+#             DUPLICATE DETECTION + DISPLAY
+# ============================================================
+work["norm_title"] = work["title"].str.lower().str.strip()
+
+duplicate_rows = work[work.duplicated("norm_title", keep="first")]
+duplicate_count = duplicate_rows.shape[0]
+unique_count = work.shape[0] - duplicate_count
+
+st.subheader("Duplicate Titles Detected")
+
+if duplicate_count == 0:
+    st.success("No duplicate titles found.")
+else:
+    st.warning(f"{duplicate_count} duplicate titles will NOT be scored.")
+    st.dataframe(duplicate_rows[["title", "abstract"]], use_container_width=True)
+
+# Keep only unique titles
+work = work.drop_duplicates("norm_title", keep="first").drop(columns=["norm_title"]).reset_index(drop=True)
+
+# ============================================================
+#                    API KEY
 # ============================================================
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter GROQ API Key", type="password")
 if not api_key:
     st.stop()
 
 # ============================================================
-#                    SCORING LOOP  (WITH THROTTLING)
+#                    SCORING LOOP
 # ============================================================
 st.subheader("Scoring with LLaMA…")
 
@@ -202,21 +195,18 @@ prog = st.progress(0.0)
 
 for i, row in work.iterrows():
     results.append(llama_score(row["title"], row["abstract"], api_key))
-
-    # Throttle slightly to avoid rate limits
     time.sleep(0.3 + random.random()/5)
-
     prog.progress((i+1)/len(work))
 
 scored = pd.DataFrame(results)
 
 # ============================================================
-#                    API FAILURES
+#                    FAILED API CALLS
 # ============================================================
 failed = scored[scored["success"] == False]
 if not failed.empty:
-    st.warning(f"{len(failed)} entries FAILED during scoring.")
-    st.dataframe(failed[["title","feedback"]])
+    st.warning(f"{len(failed)} entries failed during scoring.")
+    st.dataframe(failed[["title", "feedback"]])
 
 # ============================================================
 #                    OVERALL SCORE
@@ -226,7 +216,7 @@ crit = scored[["originality","clarity","rigor","impact","entrepreneurship"]].to_
 scored["overall"] = (crit @ weights).round(2)
 
 # ============================================================
-#                    TOP K
+#                    TOP-K DISPLAY
 # ============================================================
 st.subheader("Top Rankings")
 
@@ -238,12 +228,11 @@ st.dataframe(
     use_container_width=True
 )
 
-pick = st.selectbox("View detailed result:", top.head(TOP_K)["title"].tolist())
+pick = st.selectbox("View details:", top.head(TOP_K)["title"].tolist())
 sel = top[top["title"] == pick].iloc[0]
 
 st.write(f"""
 ### {sel['title']}
-
 **Overall Score:** {sel['overall']}
 
 - Originality: {sel['originality']}
@@ -256,17 +245,18 @@ st.write(f"""
 st.caption("Feedback: " + sel["feedback"])
 
 # ============================================================
-#                    SUMMARY OF DUPLICATES
+#                    DATA SUMMARY
 # ============================================================
 st.subheader("Data Summary")
-
 col1, col2 = st.columns(2)
 col1.metric("Duplicate Titles Removed", duplicate_count)
 col2.metric("Unique Titles Scored", unique_count)
 
 # ============================================================
-#                    DOWNLOAD
+#                    DOWNLOADS
 # ============================================================
+display_cols = ["title","overall","originality","clarity","rigor","impact","entrepreneurship","feedback"]
+
 st.download_button(
     "⬇️ Download Top-K (CSV)",
     top.head(TOP_K)[display_cols].to_csv(index=False),
