@@ -59,7 +59,7 @@ Abstract: {abstract}
         "max_tokens": MAXTOK,
     }
 
-    # Safe delay for Groq free tier
+    # Delay for Groq Free Tier
     time.sleep(0.5 + random.random() / 3)
 
     for attempt in range(3):
@@ -71,7 +71,6 @@ Abstract: {abstract}
                 timeout=40
             )
 
-            # Rate limit backoff
             if r.status_code == 429:
                 time.sleep(2 + attempt)
                 continue
@@ -152,7 +151,7 @@ if df.empty:
     st.error("The uploaded file is empty.")
     st.stop()
 
-# Column mapping
+# Validate columns
 normmap = {norm(c): c for c in df.columns}
 missing = []
 
@@ -173,24 +172,26 @@ work["abstract"] = work["abstract"].astype(str).str.strip().str[:1500]
 
 
 # ============================================================
-#             5. LOGIC — DUPLICATE HANDLING
+#         5. LOGIC — DUPLICATE REMOVAL
 # ============================================================
 
 work["norm"] = work["title"].apply(norm)
-duplicates = work[work.duplicated("norm", keep="first")]
+duplicates_df = work[work.duplicated("norm", keep="first")]
 unique_df = work.drop_duplicates("norm", keep="first")[["title", "abstract"]].reset_index(drop=True)
 
+duplicate_count = duplicates_df.shape[0]
+unique_count = unique_df.shape[0]
+
 
 # ============================================================
-#             6. UI — SHOW DUPLICATES
+#        6. UI — SIMPLE DATASET SUMMARY (NOT FULL TABLE)
 # ============================================================
 
-st.subheader("Duplicate Titles")
-if duplicates.empty:
-    st.success("No duplicate titles found.")
-else:
-    st.warning(f"{duplicates.shape[0]} duplicate titles removed.")
-    st.dataframe(duplicates[["title", "abstract"]])
+st.subheader("Dataset Summary")
+
+col1, col2 = st.columns(2)
+col1.metric("Unique Applications", unique_count)
+col2.metric("Duplicate Applications", duplicate_count)
 
 st.divider()
 
@@ -205,14 +206,7 @@ if not api_key:
 
 
 # ============================================================
-#      8. UI SECTION — TOP-K SLIDER (YOUR ORIGINAL FEATURE)
-# ============================================================
-
-TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
-
-
-# ============================================================
-#          9. LOGIC — LLaMA SCORING LOOP
+#              8. UI — SCORING WITH LLaMA
 # ============================================================
 
 st.subheader("Scoring with LLaMA Model")
@@ -223,10 +217,18 @@ for i, row in unique_df.iterrows():
     results.append(llama_score(row["title"], row["abstract"], api_key))
     progress.progress((i+1)/len(unique_df))
 
-# Convert to DataFrame
+
+# Convert results
 sc = pd.DataFrame(results)
 sc[["originality","clarity","rigor","impact","entrepreneurship"]] = pd.DataFrame(sc["scores"].tolist())
 sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1)
+
+
+# ============================================================
+#     9. UI — NOW SHOW THE TOP-K SLIDER (BELOW SCORING)
+# ============================================================
+
+TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
 
 
 # ============================================================
@@ -245,14 +247,16 @@ top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False
 
 
 # ============================================================
-#          11. UI — DISPLAY RESULTS + DOWNLOAD BUTTONS
+#      11. UI — DISPLAY RESULTS + DOWNLOADS (TOP-K + ALL)
 # ============================================================
 
 st.subheader(f"Top {TOP_K} Ranked Projects")
-st.dataframe(top_df[["title","overall","originality","clarity","rigor","impact","entrepreneurship"]])
+st.dataframe(top_df[[
+    "title","overall","originality","clarity","rigor","impact","entrepreneurship"
+]])
 
 st.download_button(
-    "⬇️ Download Top-K (CSV)",
+    "⬇️ Download Top-K Results (CSV)",
     top_df.to_csv(index=False),
     file_name=f"rise_top_{TOP_K}.csv"
 )
@@ -261,4 +265,16 @@ st.download_button(
     "⬇️ Download ALL Results (CSV)",
     sc.to_csv(index=False),
     file_name="rise_all_results.csv"
+)
+
+# ============================================================
+#     12. UI — DOWNLOAD DUPLICATE APPLICATIONS (AT END)
+# ============================================================
+
+st.subheader("Download Duplicate Applications")
+
+st.download_button(
+    "⬇️ Download Duplicate Applications (CSV)",
+    duplicates_df[["title", "abstract"]].to_csv(index=False),
+    file_name="rise_duplicate_entries.csv"
 )
