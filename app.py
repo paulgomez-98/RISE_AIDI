@@ -1,6 +1,5 @@
 # ============================================================
-#     RISE SMART SCORING — OPTIMIZED + CLEAR UI/LOGIC SPLIT
-#     SAFE FOR GROQ FREE TIER
+#     RISE SMART SCORING
 # ============================================================
 
 import os, re, json, requests, time, random, heapq
@@ -12,7 +11,7 @@ from pathlib import Path
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
 # ============================================================
-#                    1. CORE CONSTANTS & HELPERS
+#               1. CONSTANTS & BACKEND HELPERS
 # ============================================================
 
 TARGET_TITLE = "What is the title of your research/capstone project?"
@@ -24,17 +23,19 @@ TEMP       = 0.1
 MAXTOK     = 256
 
 def norm(s):
-    """Normalize titles for duplicate removal."""
+    """Normalize for duplicate removal."""
     s = str(s).strip().lower().replace("’","'")
     s = re.sub(r"[^a-z0-9 ]+", "", s)
     return re.sub(r"\s+", " ", s)
 
+
 # ============================================================
-#        2. MODEL SCORING LOGIC (NON-UI, PURE BACKEND)
+#             2. BACKEND LOGIC — LLaMA SCORING
 # ============================================================
 
 def llama_score(title, abstract, api_key):
-    """Safe + fast Groq request optimized for free tier."""
+    """Free-tier-safe Groq scoring function."""
+    
     prompt = f"""
 Return ONLY JSON:
 {{
@@ -53,12 +54,12 @@ Abstract: {abstract}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": MODEL_NAME,
-        "messages": [{"role":"user","content":prompt}],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": TEMP,
         "max_tokens": MAXTOK,
     }
 
-    # Groq FREE-tier safe delay
+    # Safe delay for Groq free tier
     time.sleep(0.5 + random.random() / 3)
 
     for attempt in range(3):
@@ -69,11 +70,14 @@ Abstract: {abstract}
                 json=payload,
                 timeout=40
             )
+
+            # Rate limit backoff
             if r.status_code == 429:
                 time.sleep(2 + attempt)
                 continue
 
             r.raise_for_status()
+
             raw = r.json()["choices"][0]["message"]["content"]
             cleaned = re.sub(r"```json|```", "", raw).strip()
             data = json.loads(cleaned)
@@ -88,7 +92,7 @@ Abstract: {abstract}
                     float(data.get("impact", 3)),
                     float(data.get("entrepreneurship", 3)),
                 ],
-                "feedback": data.get("feedback","").strip()
+                "feedback": data.get("feedback", "").strip()
             }
 
         except:
@@ -103,35 +107,52 @@ Abstract: {abstract}
 
 
 # ============================================================
-#         3. UI SECTION — HEADER & LOGO
+#              3. UI — HEADER + LOGO DISPLAY
 # ============================================================
 
 left, right = st.columns([5,1])
 with left:
-    st.markdown("<h2>RISE — Smart Scoring & Feedback (Optimized)</h2>", unsafe_allow_html=True)
-    st.write("Fast scoring → Free-tier safe → Accurate Top-K selection")
+    st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
 
 with right:
-    logo_url = st.secrets.get("LOGO_URL", "")
+    logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
+    shown = False
+
     if logo_url:
-        st.image(logo_url, use_container_width=True)
+        try:
+            st.image(logo_url, use_container_width=True)
+            shown = True
+        except:
+            pass
+
+    if not shown:
+        for p in [
+            Path("static/georgian_logo.png"),
+            Path("static/georgian_logo.jpg"),
+            Path("georgian_logo.png"),
+            Path("georgian_logo.jpg"),
+        ]:
+            if p.exists():
+                st.image(str(p), use_container_width=True)
+                break
 
 st.divider()
 
+
 # ============================================================
-#        4. UI — FILE UPLOAD + VALIDATION
+#              4. UI — FILE UPLOAD + VALIDATION
 # ============================================================
 
-file = st.file_uploader("Upload CSV/Excel file", type=["csv","xlsx"])
+file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 if not file:
     st.stop()
 
 df = pd.read_csv(file) if file.name.endswith("csv") else pd.read_excel(file)
 if df.empty:
-    st.error("Uploaded file is empty.")
+    st.error("The uploaded file is empty.")
     st.stop()
 
-# Validate required columns
+# Column mapping
 normmap = {norm(c): c for c in df.columns}
 missing = []
 
@@ -140,7 +161,7 @@ for col in [TARGET_TITLE, TARGET_ABS]:
         missing.append(col)
 
 if missing:
-    st.error("Missing required columns:\n" + "\n".join(missing))
+    st.error("Missing required columns:\n" + "\n".join(f"• {m}" for m in missing))
     st.stop()
 
 title_col = normmap[norm(TARGET_TITLE)]
@@ -150,58 +171,68 @@ work = df[[title_col, abs_col]].copy()
 work.columns = ["title", "abstract"]
 work["abstract"] = work["abstract"].astype(str).str.strip().str[:1500]
 
+
 # ============================================================
-#        5. LOGIC — DUPLICATE HANDLING (NON-UI PART)
+#             5. LOGIC — DUPLICATE HANDLING
 # ============================================================
 
 work["norm"] = work["title"].apply(norm)
 duplicates = work[work.duplicated("norm", keep="first")]
-unique_df = work.drop_duplicates("norm", keep="first")[["title","abstract"]].reset_index(drop=True)
+unique_df = work.drop_duplicates("norm", keep="first")[["title", "abstract"]].reset_index(drop=True)
+
 
 # ============================================================
-#        6. UI — DUPLICATE DISPLAY
+#             6. UI — SHOW DUPLICATES
 # ============================================================
 
-st.subheader("Duplicate Titles Detected")
-
+st.subheader("Duplicate Titles")
 if duplicates.empty:
-    st.success("No duplicates found.")
+    st.success("No duplicate titles found.")
 else:
-    st.warning(f"{duplicates.shape[0]} duplicate entries removed.")
+    st.warning(f"{duplicates.shape[0]} duplicate titles removed.")
     st.dataframe(duplicates[["title", "abstract"]])
 
 st.divider()
 
+
 # ============================================================
-#        7. UI — API KEY INPUT
+#              7. UI — API KEY INPUT
 # ============================================================
 
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter Groq API Key", type="password")
 if not api_key:
     st.stop()
 
+
 # ============================================================
-#        8. LOGIC — SCORING LOOP (BACKEND)
+#      8. UI SECTION — TOP-K SLIDER (YOUR ORIGINAL FEATURE)
 # ============================================================
 
-st.subheader("Scoring (Optimized for Groq Free Tier)")
+TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
+
+
+# ============================================================
+#          9. LOGIC — LLaMA SCORING LOOP
+# ============================================================
+
+st.subheader("Scoring with LLaMA Model")
 progress = st.progress(0.0)
-results = []
 
+results = []
 for i, row in unique_df.iterrows():
     results.append(llama_score(row["title"], row["abstract"], api_key))
     progress.progress((i+1)/len(unique_df))
 
-# Transform results
+# Convert to DataFrame
 sc = pd.DataFrame(results)
 sc[["originality","clarity","rigor","impact","entrepreneurship"]] = pd.DataFrame(sc["scores"].tolist())
 sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1)
 
+
 # ============================================================
-#        9. LOGIC — FAST TOP-10 USING MIN-HEAP
+#        10. LOGIC — FAST TOP-K USING MIN-HEAP
 # ============================================================
 
-TOP_K = 10
 heap = [(-row.overall, row.title) for _, row in sc.iterrows()]
 heapq.heapify(heap)
 
@@ -212,21 +243,22 @@ for _ in range(min(TOP_K, len(heap))):
 
 top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False)
 
+
 # ============================================================
-#        10. UI — DISPLAY RESULTS & DOWNLOAD
+#          11. UI — DISPLAY RESULTS + DOWNLOAD BUTTONS
 # ============================================================
 
-st.subheader("Top 10 Projects")
+st.subheader(f"Top {TOP_K} Ranked Projects")
 st.dataframe(top_df[["title","overall","originality","clarity","rigor","impact","entrepreneurship"]])
 
 st.download_button(
-    "⬇️ Download Top-10 (CSV)",
+    "⬇️ Download Top-K (CSV)",
     top_df.to_csv(index=False),
-    file_name="rise_top10.csv"
+    file_name=f"rise_top_{TOP_K}.csv"
 )
 
 st.download_button(
-    "⬇️ Download All Results (CSV)",
+    "⬇️ Download ALL Results (CSV)",
     sc.to_csv(index=False),
     file_name="rise_all_results.csv"
 )
