@@ -1,5 +1,5 @@
 # ============================================================
-#     RISE SMART SCORING — CLEAN ACCORDION VERSION
+#     RISE SMART SCORING — CLICK ROW TO VIEW DETAILS VERSION
 # ============================================================
 
 import os, re, json, requests, time, random, heapq
@@ -11,7 +11,7 @@ from pathlib import Path
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
 # ============================================================
-#               1. CONSTANTS & BACKEND HELPERS
+#               1. CONSTANTS & HELPERS
 # ============================================================
 
 TARGET_TITLE = "What is the title of your research/capstone project?"
@@ -30,7 +30,7 @@ def norm(s):
 
 
 # ============================================================
-#             2. LLaMA SCORING FUNCTION
+#             2. SCORING FUNCTION (with ranking_reason)
 # ============================================================
 
 def llama_score(title, abstract, api_key):
@@ -44,7 +44,7 @@ Return ONLY JSON:
 "impact": 1-5,
 "entrepreneurship": 1-5,
 "feedback": "one constructive feedback sentence",
-"ranking_reason": "one sentence explaining why this project deserves its ranking based on the rubric"
+"ranking_reason": "one sentence explaining why this project deserves its ranking"
 }}
 
 Title: {title}
@@ -52,6 +52,7 @@ Abstract: {abstract}
 """
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
     payload = {
         "model": MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
@@ -99,12 +100,12 @@ Abstract: {abstract}
         "success": False,
         "scores": [0,0,0,0,0],
         "feedback": "API ERROR",
-        "ranking_reason": "No ranking explanation available (API failure)."
+        "ranking_reason": "No explanation available due to API failure."
     }
 
 
 # ============================================================
-#              3. HEADER + LOGO UI
+#                3. HEADER + LOGO
 # ============================================================
 
 left, right = st.columns([5,1])
@@ -137,7 +138,7 @@ st.divider()
 
 
 # ============================================================
-#           4. FILE UPLOAD + COLUMN VALIDATION
+#        4. FILE UPLOAD + VALIDATION
 # ============================================================
 
 file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
@@ -145,13 +146,14 @@ if not file:
     st.stop()
 
 df = pd.read_csv(file) if file.name.endswith("csv") else pd.read_excel(file)
+
 if df.empty:
-    st.error("The uploaded file is empty.")
+    st.error("Uploaded file is empty.")
     st.stop()
 
 normmap = {norm(c): c for c in df.columns}
-missing = []
 
+missing = []
 for col in [TARGET_TITLE, TARGET_ABS]:
     if norm(col) not in normmap:
         missing.append(col)
@@ -169,7 +171,7 @@ work["abstract"] = work["abstract"].astype(str).str.strip().str[:1500]
 
 
 # ============================================================
-#                5. DUPLICATE REMOVAL
+#         5. DUPLICATE REMOVAL
 # ============================================================
 
 work["norm"] = work["title"].apply(norm)
@@ -181,20 +183,18 @@ unique_count = unique_df.shape[0]
 
 
 # ============================================================
-#                 6. DATASET SUMMARY
+#        6. SUMMARY
 # ============================================================
 
 st.subheader("Dataset Summary")
-
 col1, col2 = st.columns(2)
 col1.metric("Unique Applications", unique_count)
 col2.metric("Duplicate Applications", duplicate_count)
-
 st.divider()
 
 
 # ============================================================
-#                   7. API KEY INPUT
+#        7. API KEY INPUT
 # ============================================================
 
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter Groq API Key", type="password")
@@ -203,7 +203,7 @@ if not api_key:
 
 
 # ============================================================
-#               8. SCORE ALL UNIQUE PROJECTS
+#        8. SCORING ALL UNIQUE PROJECTS
 # ============================================================
 
 st.subheader("Scoring with LLaMA Model")
@@ -222,28 +222,29 @@ st.divider()
 
 
 # ============================================================
-#                9. TOP-K SELECTION
+#        9. TOP-K SELECTION
 # ============================================================
 
 TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
 
 
 # ============================================================
-#                10. RUBRIC DEFINITIONS
+#        10. RUBRIC DEFINITIONS
 # ============================================================
 
 st.markdown("""
 ### Rubric Criteria Explained
 
-**Originality** – Unique, creative, and innovative idea.  
-**Clarity** – Abstract is well-written, structured, and understandable.  
-**Rigor** – Strong methodology and academic depth.  
-**Impact** – Potential benefit and real-world usefulness.  
+**Originality** – Unique and innovative research idea.  
+**Clarity** – Well-written and easy to understand.  
+**Rigor** – Strong academic depth and research quality.  
+**Impact** – Real-world relevance and usefulness.  
 **Entrepreneurship** – Practical or commercial application potential.
 """)
 
+
 # ============================================================
-#        11. SELECT TOP-K USING MIN-HEAP
+#        11. SELECT TOP-K PROJECTS
 # ============================================================
 
 heap = [(-row.overall, row.title) for _, row in sc.iterrows()]
@@ -258,39 +259,60 @@ top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False
 
 
 # ============================================================
-#      12. CLEAN COMBINED ACCORDION UI
+#  12. INTERACTIVE TABLE (CLICK ROW TO SHOW DETAILS)
 # ============================================================
 
-st.subheader(f"Top {TOP_K} Ranked Projects (Click to Expand)")
+st.subheader(f"Top {TOP_K} Ranked Projects")
 
-rank = 1
-for _, row in top_df.iterrows():
-    with st.expander(f"{rank}. {row['title']} — Score: {round(row['overall'], 2)}"):
-        st.markdown(f"""
+edited = st.data_editor(
+    top_df[[
+        "title","overall","originality","clarity","rigor","impact","entrepreneurship","ranking_reason","feedback"
+    ]],
+    hide_index=True,
+    use_container_width=True,
+    disabled=True,
+    key="topk_table",
+    selection_mode="single-row"
+)
+
+# Show selected project details
+if "topk_table" in st.session_state and st.session_state["topk_table"]["selection"]["rows"]:
+    sel_index = st.session_state["topk_table"]["selection"]["rows"][0]
+    selected_row = top_df.iloc[sel_index]
+
+    st.markdown("---")
+    st.subheader("Project Details")
+
+    st.markdown(f"""
+### **{selected_row['title']}**
+**Overall Score:** {round(selected_row['overall'], 2)}
+
 **Rubric Breakdown**
-- Originality: {row['originality']}
-- Clarity: {row['clarity']}
-- Rigor: {row['rigor']}
-- Impact: {row['impact']}
-- Entrepreneurship: {row['entrepreneurship']}
+- Originality: {selected_row['originality']}
+- Clarity: {selected_row['clarity']}
+- Rigor: {selected_row['rigor']}
+- Impact: {selected_row['impact']}
+- Entrepreneurship: {selected_row['entrepreneurship']}
 
 ---
 
-### 📝 Why This Project Ranked Highly  
-**{row['ranking_reason']}**
+### 📝 Why This Project Ranked Highly
+**{selected_row['ranking_reason']}**
 
 ---
 
-### 💬 Constructive Feedback  
-{row['feedback']}
-        """)
-    rank += 1
+### 💬 Constructive Feedback
+{selected_row['feedback']}
+""")
+
+else:
+    st.info("Click a row in the table above to view full project details.")
 
 st.divider()
 
 
 # ============================================================
-#                 13. DOWNLOAD BUTTONS
+#        13. DOWNLOAD OPTIONS
 # ============================================================
 
 st.download_button(
@@ -307,7 +329,7 @@ st.download_button(
 
 
 # ============================================================
-#          14. DUPLICATE APPLICATIONS DOWNLOAD
+#        14. DUPLICATE APPLICATIONS DOWNLOAD
 # ============================================================
 
 st.subheader("Download Duplicate Applications")
