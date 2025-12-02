@@ -44,7 +44,8 @@ Return ONLY JSON:
 "rigor": 1-5,
 "impact": 1-5,
 "entrepreneurship": 1-5,
-"feedback": "one constructive feedback sentence"
+"feedback": "one constructive feedback sentence",
+"ranking_reason": "one sentence explaining why this project deserves its ranking based on the rubric"
 }}
 
 Title: {title}
@@ -91,7 +92,8 @@ Abstract: {abstract}
                     float(data.get("impact", 3)),
                     float(data.get("entrepreneurship", 3)),
                 ],
-                "feedback": data.get("feedback", "").strip()
+                "feedback": data.get("feedback", "").strip(),
+                "ranking_reason": data.get("ranking_reason", "").strip()
             }
 
         except:
@@ -101,7 +103,8 @@ Abstract: {abstract}
         "title": title,
         "success": False,
         "scores": [0,0,0,0,0],
-        "feedback": "API ERROR"
+        "feedback": "API ERROR",
+        "ranking_reason": "No ranking explanation available due to API failure."
     }
 
 
@@ -222,6 +225,7 @@ for i, row in unique_df.iterrows():
 sc = pd.DataFrame(results)
 sc[["originality","clarity","rigor","impact","entrepreneurship"]] = pd.DataFrame(sc["scores"].tolist())
 sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1)
+sc["ranking_reason"] = sc["ranking_reason"]
 
 
 # ============================================================
@@ -243,6 +247,7 @@ st.markdown("""
 **Impact** – Estimates the potential benefit, usefulness, or real-world influence the research could create.  
 **Entrepreneurship** – Looks at the commercial, practical, or innovative application potential of the project idea.
 """)
+
 # ============================================================
 #        10.FAST TOP-K USING MIN-HEAP
 # ============================================================
@@ -264,9 +269,19 @@ top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False
 
 st.subheader(f"Top {TOP_K} Ranked Projects")
 st.dataframe(top_df[[
-    "title","overall","originality","clarity","rigor","impact","entrepreneurship"
+    "title","overall","originality","clarity","rigor","impact","entrepreneurship","ranking_reason"
 ]])
 
+# Ranking reasons section
+st.markdown("### Why Each Project Ranked Highly")
+
+for _, row in top_df.iterrows():
+    st.markdown(f"""
+**{row['title']}**  
+*{row['ranking_reason']}*
+""")
+
+# Downloads
 st.download_button(
     "⬇️ Download Top-K Results (CSV)",
     top_df.to_csv(index=False),
@@ -290,4 +305,3 @@ st.download_button(
     duplicates_df[["title", "abstract"]].to_csv(index=False),
     file_name="rise_duplicate_entries.csv"
 )
-
