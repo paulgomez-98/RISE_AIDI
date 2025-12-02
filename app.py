@@ -1,5 +1,5 @@
 # ============================================================
-#     RISE SMART SCORING — CLICK ROW TO VIEW DETAILS VERSION
+#     RISE SMART SCORING — CLICK ROW + CACHED SCORING
 # ============================================================
 
 import os, re, json, requests, time, random, heapq
@@ -23,14 +23,13 @@ TEMP       = 0.1
 MAXTOK     = 256
 
 def norm(s):
-    """Normalize for duplicate removal."""
     s = str(s).strip().lower().replace("’","'")
     s = re.sub(r"[^a-z0-9 ]+", "", s)
     return re.sub(r"\s+", " ", s)
 
 
 # ============================================================
-#             2. SCORING FUNCTION (with ranking_reason)
+#             2. LLaMA SCORING FUNCTION
 # ============================================================
 
 def llama_score(title, abstract, api_key):
@@ -50,9 +49,7 @@ Return ONLY JSON:
 Title: {title}
 Abstract: {abstract}
 """
-
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
     payload = {
         "model": MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
@@ -100,12 +97,25 @@ Abstract: {abstract}
         "success": False,
         "scores": [0,0,0,0,0],
         "feedback": "API ERROR",
-        "ranking_reason": "No explanation available due to API failure."
+        "ranking_reason": "No ranking explanation available (API failure)."
     }
 
 
 # ============================================================
-#                3. HEADER + LOGO
+#           3. CACHE — SCORE ALL PROJECTS ONLY ONCE
+# ============================================================
+
+@st.cache_data(show_spinner=True)
+def score_all_projects_cached(df, api_key):
+    """Runs scoring only once; prevents reruns when UI updates."""
+    scored = []
+    for _, row in df.iterrows():
+        scored.append(llama_score(row["title"], row["abstract"], api_key))
+    return pd.DataFrame(scored)
+
+
+# ============================================================
+#                4. HEADER + LOGO
 # ============================================================
 
 left, right = st.columns([5,1])
@@ -114,31 +124,17 @@ with left:
 
 with right:
     logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
-    shown = False
-
     if logo_url:
         try:
             st.image(logo_url, use_container_width=True)
-            shown = True
         except:
             pass
-
-    if not shown:
-        for p in [
-            Path("static/georgian_logo.png"),
-            Path("static/georgian_logo.jpg"),
-            Path("georgian_logo.png"),
-            Path("georgian_logo.jpg"),
-        ]:
-            if p.exists():
-                st.image(str(p), use_container_width=True)
-                break
 
 st.divider()
 
 
 # ============================================================
-#        4. FILE UPLOAD + VALIDATION
+#   5. FILE UPLOAD + COLUMN VALIDATION
 # ============================================================
 
 file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
@@ -146,14 +142,13 @@ if not file:
     st.stop()
 
 df = pd.read_csv(file) if file.name.endswith("csv") else pd.read_excel(file)
-
 if df.empty:
     st.error("Uploaded file is empty.")
     st.stop()
 
 normmap = {norm(c): c for c in df.columns}
-
 missing = []
+
 for col in [TARGET_TITLE, TARGET_ABS]:
     if norm(col) not in normmap:
         missing.append(col)
@@ -171,30 +166,23 @@ work["abstract"] = work["abstract"].astype(str).str.strip().str[:1500]
 
 
 # ============================================================
-#         5. DUPLICATE REMOVAL
+#                6. DUPLICATE REMOVAL
 # ============================================================
 
 work["norm"] = work["title"].apply(norm)
 duplicates_df = work[work.duplicated("norm", keep="first")]
 unique_df = work.drop_duplicates("norm", keep="first")[["title", "abstract"]].reset_index(drop=True)
 
-duplicate_count = duplicates_df.shape[0]
-unique_count = unique_df.shape[0]
-
-
-# ============================================================
-#        6. SUMMARY
-# ============================================================
-
 st.subheader("Dataset Summary")
 col1, col2 = st.columns(2)
-col1.metric("Unique Applications", unique_count)
-col2.metric("Duplicate Applications", duplicate_count)
+col1.metric("Unique Applications", unique_df.shape[0])
+col2.metric("Duplicate Applications", duplicates_df.shape[0])
+
 st.divider()
 
 
 # ============================================================
-#        7. API KEY INPUT
+#                7. API KEY
 # ============================================================
 
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter Groq API Key", type="password")
@@ -203,18 +191,14 @@ if not api_key:
 
 
 # ============================================================
-#        8. SCORING ALL UNIQUE PROJECTS
+#                8. SCORE PROJECTS (CACHED)
 # ============================================================
 
 st.subheader("Scoring with LLaMA Model")
-progress = st.progress(0.0)
 
-results = []
-for i, row in unique_df.iterrows():
-    results.append(llama_score(row["title"], row["abstract"], api_key))
-    progress.progress((i+1)/len(unique_df))
+with st.spinner("Scoring projects… This will run only once."):
+    sc = score_all_projects_cached(unique_df, api_key)
 
-sc = pd.DataFrame(results)
 sc[["originality","clarity","rigor","impact","entrepreneurship"]] = pd.DataFrame(sc["scores"].tolist())
 sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1)
 
@@ -222,49 +206,24 @@ st.divider()
 
 
 # ============================================================
-#        9. TOP-K SELECTION
+#                9. TOP-K SELECTION
 # ============================================================
 
 TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
 
-
-# ============================================================
-#        10. RUBRIC DEFINITIONS
-# ============================================================
-
-st.markdown("""
-### Rubric Criteria Explained
-
-**Originality** – Unique and innovative research idea.  
-**Clarity** – Well-written and easy to understand.  
-**Rigor** – Strong academic depth and research quality.  
-**Impact** – Real-world relevance and usefulness.  
-**Entrepreneurship** – Practical or commercial application potential.
-""")
-
-
-# ============================================================
-#        11. SELECT TOP-K PROJECTS
-# ============================================================
-
 heap = [(-row.overall, row.title) for _, row in sc.iterrows()]
 heapq.heapify(heap)
-
-top_titles = []
-for _ in range(min(TOP_K, len(heap))):
-    score, title = heapq.heappop(heap)
-    top_titles.append(title)
+top_titles = [heapq.heappop(heap)[1] for _ in range(min(TOP_K, len(heap)))]
 
 top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False)
 
 
 # ============================================================
-#  12. INTERACTIVE TABLE (CLICK ROW TO SHOW DETAILS)
+#                10. TOP-K TABLE + DETAILS (NO RELOAD)
 # ============================================================
 
 st.subheader(f"Top {TOP_K} Ranked Projects")
 
-# Show table
 st.dataframe(
     top_df[[
         "title","overall","originality","clarity","rigor","impact","entrepreneurship"
@@ -273,7 +232,6 @@ st.dataframe(
     hide_index=True
 )
 
-# Selection dropdown
 selected_title = st.selectbox(
     "Select a project to view full details:",
     options=top_df["title"].tolist()
@@ -306,8 +264,11 @@ st.markdown(f"""
 {selected_row['feedback']}
 """)
 
+st.divider()
+
+
 # ============================================================
-#        13. DOWNLOAD OPTIONS
+#                11. DOWNLOAD BUTTONS
 # ============================================================
 
 st.download_button(
@@ -324,14 +285,13 @@ st.download_button(
 
 
 # ============================================================
-#        14. DUPLICATE APPLICATIONS DOWNLOAD
+#            12. DUPLICATE DOWNLOAD
 # ============================================================
 
 st.subheader("Download Duplicate Applications")
 
 st.download_button(
     "⬇️ Download Duplicate Applications (CSV)",
-    duplicates_df[["title", "abstract"]].to_csv(index=False),
+    duplicates_df[["title","abstract"]].to_csv(index=False),
     file_name="rise_duplicate_entries.csv"
 )
-
