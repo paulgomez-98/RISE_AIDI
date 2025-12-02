@@ -1,5 +1,5 @@
 # ============================================================
-#     RISE SMART SCORING — PRODUCTION VERSION
+#     RISE SMART SCORING — FIXED VERSION (Selection Works)
 # ============================================================
 
 import os, re, json, requests, time, random, heapq
@@ -182,46 +182,37 @@ if not api_key:
 
 
 # ============================================================
-#   7. SCORING (CACHED USING SESSION STATE + PROGRESS BAR)
+#   7. SCORING — CACHED PROPERLY (NO SESSION STATE BUGS)
 # ============================================================
 
-st.subheader("Scoring with LLaMA Model")
-
-progress = st.progress(0.0)
-
-# If cached scoring does not exist, run scoring once
-if "scored_cache" not in st.session_state:
-
+@st.cache_data(show_spinner=False)
+def score_all(unique_df, api_key):
     results = []
+    progress = st.progress(0.0)
+
     for i, row in unique_df.iterrows():
         results.append(llama_score(row["title"], row["abstract"], api_key))
         progress.progress((i+1)/len(unique_df))
 
-    sc = pd.DataFrame(results)
-    st.session_state["scored_cache"] = sc
+    return pd.DataFrame(results)
 
-else:
-    sc = st.session_state["scored_cache"]
-    progress.progress(1.0)
+sc = score_all(unique_df, api_key)
 
 st.divider()
 
 
 # ============================================================
-#   8. TOP-K SELECTION
+#   8. RUBRIC CALCULATIONS
 # ============================================================
 
-TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
-
-# Compute rubric columns
 sc[["originality","clarity","rigor","impact","entrepreneurship"]] = pd.DataFrame(sc["scores"].tolist())
 sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1)
 
-# Use heap for fastest top-K selection
+TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
+
 heap = [(-row.overall, row.title) for _, row in sc.iterrows()]
 heapq.heapify(heap)
 top_titles = [heapq.heappop(heap)[1] for _ in range(min(TOP_K, len(heap)))]
-
 top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False)
 
 
@@ -241,7 +232,7 @@ st.markdown("""
 
 
 # ============================================================
-#   10. DISPLAY TOP-K TABLE + CLICK TO SEE DETAILS
+#   10. TABLE (CLICK TO VIEW DETAILS)
 # ============================================================
 
 st.subheader(f"Top {TOP_K} Ranked Projects")
@@ -259,38 +250,43 @@ selected_title = st.selectbox(
     options=top_df["title"].tolist()
 )
 
-selected_row = top_df[top_df["title"] == selected_title].iloc[0]
+this = top_df[top_df["title"] == selected_title].iloc[0]
+
+
+# ============================================================
+#   11. DETAILS AREA — ALWAYS UPDATES NOW
+# ============================================================
 
 st.markdown("---")
 st.subheader("Project Details")
 
 st.markdown(f"""
-### **{selected_row['title']}**
-**Overall Score:** {round(selected_row['overall'], 2)}
+### **{this['title']}**
+**Overall Score:** {round(this['overall'], 2)}
 
 **Rubric Breakdown**
-- Originality: {selected_row['originality']}
-- Clarity: {selected_row['clarity']}
-- Rigor: {selected_row['rigor']}
-- Impact: {selected_row['impact']}
-- Entrepreneurship: {selected_row['entrepreneurship']}
+- Originality: {this['originality']}
+- Clarity: {this['clarity']}
+- Rigor: {this['rigor']}
+- Impact: {this['impact']}
+- Entrepreneurship: {this['entrepreneurship']}
 
 ---
 
 ### 📝 Why This Project Ranked Highly  
-**{selected_row['ranking_reason']}**
+**{this['ranking_reason']}**
 
 ---
 
 ### 💬 Constructive Feedback  
-{selected_row['feedback']}
+{this['feedback']}
 """)
 
 st.divider()
 
 
 # ============================================================
-#   11. DOWNLOAD BUTTONS
+#   12. DOWNLOAD BUTTONS
 # ============================================================
 
 st.download_button(
@@ -304,11 +300,6 @@ st.download_button(
     sc.to_csv(index=False),
     file_name="rise_all_results.csv"
 )
-
-
-# ============================================================
-#   12. DUPLICATE DOWNLOAD
-# ============================================================
 
 st.subheader("Download Duplicate Applications")
 
