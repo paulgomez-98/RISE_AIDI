@@ -1,5 +1,5 @@
 # ============================================================
-#     RISE SMART SCORING — FIXED VERSION (Selection Works)
+#     RISE SMART SCORING
 # ============================================================
 
 import os, re, json, requests, time, random, heapq
@@ -182,7 +182,7 @@ if not api_key:
 
 
 # ============================================================
-#   7. SCORING — CACHED PROPERLY (NO SESSION STATE BUGS)
+#   7. SCORING
 # ============================================================
 
 @st.cache_data(show_spinner=False)
@@ -232,7 +232,7 @@ st.markdown("""
 
 
 # ============================================================
-#   10. TABLE (CLICK TO VIEW DETAILS)
+#   10. TABLE
 # ============================================================
 
 st.subheader(f"Top {TOP_K} Ranked Projects")
@@ -308,3 +308,4 @@ st.download_button(
     duplicates_df[["title","abstract"]].to_csv(index=False),
     file_name="rise_duplicate_entries.csv"
 )
+
