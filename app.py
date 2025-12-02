@@ -1,5 +1,5 @@
 # ============================================================
-#     RISE SMART SCORING — CLICK ROW + CACHED SCORING
+#     RISE SMART SCORING — PRODUCTION VERSION
 # ============================================================
 
 import os, re, json, requests, time, random, heapq
@@ -11,7 +11,7 @@ from pathlib import Path
 st.set_page_config(page_title="RISE Smart Scoring", layout="wide")
 
 # ============================================================
-#               1. CONSTANTS & HELPERS
+#       1. CONSTANTS & HELPERS
 # ============================================================
 
 TARGET_TITLE = "What is the title of your research/capstone project?"
@@ -29,7 +29,7 @@ def norm(s):
 
 
 # ============================================================
-#             2. LLaMA SCORING FUNCTION
+#       2. LLaMA SCORING FUNCTION
 # ============================================================
 
 def llama_score(title, abstract, api_key):
@@ -49,6 +49,7 @@ Return ONLY JSON:
 Title: {title}
 Abstract: {abstract}
 """
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": MODEL_NAME,
@@ -102,20 +103,7 @@ Abstract: {abstract}
 
 
 # ============================================================
-#           3. CACHE — SCORE ALL PROJECTS ONLY ONCE
-# ============================================================
-
-@st.cache_data(show_spinner=True)
-def score_all_projects_cached(df, api_key):
-    """Runs scoring only once; prevents reruns when UI updates."""
-    scored = []
-    for _, row in df.iterrows():
-        scored.append(llama_score(row["title"], row["abstract"], api_key))
-    return pd.DataFrame(scored)
-
-
-# ============================================================
-#                4. HEADER + LOGO
+#   3. HEADER + LOGO
 # ============================================================
 
 left, right = st.columns([5,1])
@@ -134,7 +122,7 @@ st.divider()
 
 
 # ============================================================
-#   5. FILE UPLOAD + COLUMN VALIDATION
+#   4. FILE UPLOAD & VALIDATION
 # ============================================================
 
 file = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
@@ -142,10 +130,12 @@ if not file:
     st.stop()
 
 df = pd.read_csv(file) if file.name.endswith("csv") else pd.read_excel(file)
+
 if df.empty:
     st.error("Uploaded file is empty.")
     st.stop()
 
+# Validate columns
 normmap = {norm(c): c for c in df.columns}
 missing = []
 
@@ -157,6 +147,7 @@ if missing:
     st.error("Missing required columns:\n" + "\n".join(f"• {m}" for m in missing))
     st.stop()
 
+# Extract correct columns
 title_col = normmap[norm(TARGET_TITLE)]
 abs_col   = normmap[norm(TARGET_ABS)]
 
@@ -166,7 +157,7 @@ work["abstract"] = work["abstract"].astype(str).str.strip().str[:1500]
 
 
 # ============================================================
-#                6. DUPLICATE REMOVAL
+#   5. DUPLICATE REMOVAL
 # ============================================================
 
 work["norm"] = work["title"].apply(norm)
@@ -182,7 +173,7 @@ st.divider()
 
 
 # ============================================================
-#                7. API KEY
+#   6. API KEY
 # ============================================================
 
 api_key = st.secrets.get("GROQ_API_KEY") or st.text_input("Enter Groq API Key", type="password")
@@ -191,26 +182,42 @@ if not api_key:
 
 
 # ============================================================
-#                8. SCORE PROJECTS (CACHED)
+#   7. SCORING (CACHED USING SESSION STATE + PROGRESS BAR)
 # ============================================================
 
 st.subheader("Scoring with LLaMA Model")
 
-with st.spinner("Scoring projects… This will run only once."):
-    sc = score_all_projects_cached(unique_df, api_key)
+progress = st.progress(0.0)
 
-sc[["originality","clarity","rigor","impact","entrepreneurship"]] = pd.DataFrame(sc["scores"].tolist())
-sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1)
+# If cached scoring does not exist, run scoring once
+if "scored_cache" not in st.session_state:
+
+    results = []
+    for i, row in unique_df.iterrows():
+        results.append(llama_score(row["title"], row["abstract"], api_key))
+        progress.progress((i+1)/len(unique_df))
+
+    sc = pd.DataFrame(results)
+    st.session_state["scored_cache"] = sc
+
+else:
+    sc = st.session_state["scored_cache"]
+    progress.progress(1.0)
 
 st.divider()
 
 
 # ============================================================
-#                9. TOP-K SELECTION
+#   8. TOP-K SELECTION
 # ============================================================
 
 TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
 
+# Compute rubric columns
+sc[["originality","clarity","rigor","impact","entrepreneurship"]] = pd.DataFrame(sc["scores"].tolist())
+sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]].mean(axis=1)
+
+# Use heap for fastest top-K selection
 heap = [(-row.overall, row.title) for _, row in sc.iterrows()]
 heapq.heapify(heap)
 top_titles = [heapq.heappop(heap)[1] for _ in range(min(TOP_K, len(heap)))]
@@ -219,7 +226,22 @@ top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False
 
 
 # ============================================================
-#                10. TOP-K TABLE + DETAILS (NO RELOAD)
+#   9. RUBRIC DEFINITIONS
+# ============================================================
+
+st.markdown("""
+### Rubric Criteria Explained
+
+**Originality** – Uniqueness and creativity of the idea.  
+**Clarity** – Abstract is structured, clear and easy to understand.  
+**Rigor** – Strength of methodology and research depth.  
+**Impact** – Potential real-world usefulness of the idea.  
+**Entrepreneurship** – Potential for innovation or commercialization.
+""")
+
+
+# ============================================================
+#   10. DISPLAY TOP-K TABLE + CLICK TO SEE DETAILS
 # ============================================================
 
 st.subheader(f"Top {TOP_K} Ranked Projects")
@@ -268,7 +290,7 @@ st.divider()
 
 
 # ============================================================
-#                11. DOWNLOAD BUTTONS
+#   11. DOWNLOAD BUTTONS
 # ============================================================
 
 st.download_button(
@@ -285,7 +307,7 @@ st.download_button(
 
 
 # ============================================================
-#            12. DUPLICATE DOWNLOAD
+#   12. DUPLICATE DOWNLOAD
 # ============================================================
 
 st.subheader("Download Duplicate Applications")
