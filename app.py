@@ -60,7 +60,6 @@ Abstract: {abstract}
         "max_tokens": MAXTOK,
     }
 
-    # Delay for Groq Free Tier
     time.sleep(0.5 + random.random() / 3)
 
     for attempt in range(3):
@@ -154,7 +153,6 @@ if df.empty:
     st.error("The uploaded file is empty.")
     st.stop()
 
-# Validate columns
 normmap = {norm(c): c for c in df.columns}
 missing = []
 
@@ -175,7 +173,7 @@ work["abstract"] = work["abstract"].astype(str).str.strip().str[:1500]
 
 
 # ============================================================
-#         5.DUPLICATE REMOVAL
+#         5. DUPLICATE REMOVAL
 # ============================================================
 
 work["norm"] = work["title"].apply(norm)
@@ -249,7 +247,7 @@ st.markdown("""
 """)
 
 # ============================================================
-#        10.FAST TOP-K USING MIN-HEAP
+#        10. FAST TOP-K USING MIN-HEAP
 # ============================================================
 
 heap = [(-row.overall, row.title) for _, row in sc.iterrows()]
@@ -272,14 +270,34 @@ st.dataframe(top_df[[
     "title","overall","originality","clarity","rigor","impact","entrepreneurship","ranking_reason"
 ]])
 
-# Ranking reasons section
-st.markdown("### Why Each Project Ranked Highly")
+# ============================================================
+#     ACCORDION — CLICK PROJECT TO VIEW EXPLANATION
+# ============================================================
+
+st.subheader("Click a Project to View Ranking Explanation")
 
 for _, row in top_df.iterrows():
-    st.markdown(f"""
-**{row['title']}**  
-*{row['ranking_reason']}*
-""")
+    with st.expander(f"{row['title']}  —  Score: {round(row['overall'], 2)}"):
+        st.markdown(f"""
+**Overall Score:** {row['overall']}
+
+**Rubric Breakdown**
+- Originality: {row['originality']}
+- Clarity: {row['clarity']}
+- Rigor: {row['rigor']}
+- Impact: {row['impact']}
+- Entrepreneurship: {row['entrepreneurship']}
+
+---
+
+### 📝 Why This Project Ranked Highly
+**{row['ranking_reason']}**
+
+---
+
+### 💬 Constructive Feedback
+{row['feedback']}
+        """)
 
 # Downloads
 st.download_button(
