@@ -30,7 +30,7 @@ def norm(s):
 
 
 # ============================================================
-#             2. BACKEND LOGIC — LLaMA SCORING
+#             2. LLaMA SCORING
 # ============================================================
 
 def llama_score(title, abstract, api_key):
@@ -172,7 +172,7 @@ work["abstract"] = work["abstract"].astype(str).str.strip().str[:1500]
 
 
 # ============================================================
-#         5. LOGIC — DUPLICATE REMOVAL
+#         5.DUPLICATE REMOVAL
 # ============================================================
 
 work["norm"] = work["title"].apply(norm)
@@ -184,7 +184,7 @@ unique_count = unique_df.shape[0]
 
 
 # ============================================================
-#        6. UI — SIMPLE DATASET SUMMARY (NOT FULL TABLE)
+#        6. UI — SIMPLE DATASET SUMMARY
 # ============================================================
 
 st.subheader("Dataset Summary")
@@ -225,14 +225,26 @@ sc["overall"] = sc[["originality","clarity","rigor","impact","entrepreneurship"]
 
 
 # ============================================================
-#     9. UI — NOW SHOW THE TOP-K SLIDER (BELOW SCORING)
+#     9. UI — NOW SHOW THE TOP-K SLIDER
 # ============================================================
 
 TOP_K = st.slider("Select Top-K Projects", 5, 50, 10, 5)
 
-
 # ============================================================
-#        10. LOGIC — FAST TOP-K USING MIN-HEAP
+#              RUBRIC DEFINITIONS
+# ============================================================
+
+st.markdown("""
+### Rubric Criteria Explained
+
+**Originality** – Evaluates how unique, creative, and innovative the research idea is compared to typical submissions.  
+**Clarity** – Measures how clearly the project idea and abstract are written, organized, and easy to understand.  
+**Rigor** – Assesses the depth of research, methodology strength, and the academic soundness of the work.  
+**Impact** – Estimates the potential benefit, usefulness, or real-world influence the research could create.  
+**Entrepreneurship** – Looks at the commercial, practical, or innovative application potential of the project idea.
+""")
+# ============================================================
+#        10.FAST TOP-K USING MIN-HEAP
 # ============================================================
 
 heap = [(-row.overall, row.title) for _, row in sc.iterrows()]
@@ -278,3 +290,4 @@ st.download_button(
     duplicates_df[["title", "abstract"]].to_csv(index=False),
     file_name="rise_duplicate_entries.csv"
 )
+
