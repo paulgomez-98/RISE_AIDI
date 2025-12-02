@@ -264,26 +264,27 @@ top_df = sc[sc["title"].isin(top_titles)].sort_values("overall", ascending=False
 
 st.subheader(f"Top {TOP_K} Ranked Projects")
 
-edited = st.data_editor(
+# Show table
+st.dataframe(
     top_df[[
-        "title","overall","originality","clarity","rigor","impact","entrepreneurship","ranking_reason","feedback"
+        "title","overall","originality","clarity","rigor","impact","entrepreneurship"
     ]],
-    hide_index=True,
     use_container_width=True,
-    disabled=True,
-    key="topk_table",
-    selection_mode="single-row"
+    hide_index=True
 )
 
-# Show selected project details
-if "topk_table" in st.session_state and st.session_state["topk_table"]["selection"]["rows"]:
-    sel_index = st.session_state["topk_table"]["selection"]["rows"][0]
-    selected_row = top_df.iloc[sel_index]
+# Selection dropdown
+selected_title = st.selectbox(
+    "Select a project to view full details:",
+    options=top_df["title"].tolist()
+)
 
-    st.markdown("---")
-    st.subheader("Project Details")
+selected_row = top_df[top_df["title"] == selected_title].iloc[0]
 
-    st.markdown(f"""
+st.markdown("---")
+st.subheader("Project Details")
+
+st.markdown(f"""
 ### **{selected_row['title']}**
 **Overall Score:** {round(selected_row['overall'], 2)}
 
@@ -296,20 +297,14 @@ if "topk_table" in st.session_state and st.session_state["topk_table"]["selectio
 
 ---
 
-### 📝 Why This Project Ranked Highly
+### 📝 Why This Project Ranked Highly  
 **{selected_row['ranking_reason']}**
 
 ---
 
-### 💬 Constructive Feedback
+### 💬 Constructive Feedback  
 {selected_row['feedback']}
 """)
-
-else:
-    st.info("Click a row in the table above to view full project details.")
-
-st.divider()
-
 
 # ============================================================
 #        13. DOWNLOAD OPTIONS
@@ -339,3 +334,4 @@ st.download_button(
     duplicates_df[["title", "abstract"]].to_csv(index=False),
     file_name="rise_duplicate_entries.csv"
 )
+
