@@ -111,10 +111,9 @@ with left:
     st.markdown("<h2>RISE — Smart Scoring & Feedback</h2>", unsafe_allow_html=True)
 
 with right:
-    logo_url = st.secrets.get("LOGO_URL", os.getenv("LOGO_URL", ""))
-    if logo_url:
-        try:
-            st.image(logo_url, use_container_width=True)
+    logo_path = "static/georgian_logo.png"
+    if os.path.exists(logo_path):
+        st.image(logo_path, use_container_width=True)
         except:
             pass
 
@@ -308,4 +307,5 @@ st.download_button(
     duplicates_df[["title","abstract"]].to_csv(index=False),
     file_name="rise_duplicate_entries.csv"
 )
+
 
