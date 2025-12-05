@@ -114,8 +114,8 @@ with right:
     logo_path = "static/georgian_logo.png"
     if os.path.exists(logo_path):
         st.image(logo_path, use_container_width=True)
-        except:
-            pass
+    else:
+        st.write("⚠️ Logo not found in /static/ folder")
 
 st.divider()
 
@@ -307,5 +307,3 @@ st.download_button(
     duplicates_df[["title","abstract"]].to_csv(index=False),
     file_name="rise_duplicate_entries.csv"
 )
-
-
